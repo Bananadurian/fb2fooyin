@@ -76,3 +76,7 @@ python3 -m pytest tests/    # or the stdlib runner if pytest isn't installed
 ```
 
 See [DESIGN.md](DESIGN.md) for the full database-schema and merge design.
+
+## License
+
+[MIT](LICENSE) © Bananadurian

@@ -75,3 +75,7 @@ python3 -m pytest tests/    # 若未装 pytest，可用标准库简易 runner
 ```
 
 更多设计细节见 [DESIGN.zh-CN.md](DESIGN.zh-CN.md)。
+
+## 许可证
+
+[MIT](LICENSE) © Bananadurian

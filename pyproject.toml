@@ -3,6 +3,8 @@ name = "fb2fooyin"
 version = "0.1.0"
 description = "Migrate foobar2000 playback statistics (count/first/last/added/rating) into fooyin"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Bananadurian" }]
 dependencies = []
 
 [project.scripts]
