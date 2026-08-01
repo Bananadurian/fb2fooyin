@@ -67,18 +67,21 @@ uv run fb2fooyin inspect "hypnotize"
 
 ```
 xg/20260123_the core - 核 [e]_[qobuz-24-48-flac]/06. hypnotize.flac
-  field        foobar                  fooyin
-  play_count   54                      60
-  rating       unrated (0xFF)          4.0★ (0.8)
-  first_played 2026-01-23 11:22        2026-01-23 11:22
-  last_played  2026-04-15 17:42        2026-08-01 13:55
-  added        2026-01-23 11:19        2026-01-23 11:19
+  field        foobar                  fooyin                  merged
+  play_count   54                      60                      60
+  rating       unrated (0xFF)          4.0★ (0.8)              4.0★ (0.8)
+  first_played 2026-01-23 11:22        2026-01-23 11:22        2026-01-23 11:22
+  last_played  2026-04-15 17:42        2026-08-01 13:55        2026-08-01 13:55
+  added        2026-01-23 11:19        2026-01-23 11:19        2026-01-23 11:19
   hash         f3cf30dd86e5…           f3cf30dd86e5…
   match        matched BY HASH ✓ (path-independent)
 ```
 
-`hash` 行是 foobar 重算 vs fooyin 存储的 `TrackHash`；`match` 行说明该曲是按
-哈希匹配、还是回退到了尾部。
+`merged` 是一次导入会写入的结果 —— 与导入同一套合并规则、且感知 sidecar。此处它
+等于 `fooyin`，因为该曲已导入过（重跑是安全的空操作）；对一首全新曲目，它会显示
+foobar 的播放数叠加到 fooyin 上、first/added 取最早、last 取最晚。`hash` 行是
+foobar 重算 vs fooyin 存储的 `TrackHash`，`match` 说明该曲是按哈希匹配、还是回退
+到了尾部。
 
 导入前（预看会变什么）与导入后（确认已写入）都好用。
 

@@ -73,18 +73,22 @@ uv run fb2fooyin inspect "hypnotize"
 
 ```
 xg/20260123_the core - 核 [e]_[qobuz-24-48-flac]/06. hypnotize.flac
-  field        foobar                  fooyin
-  play_count   54                      60
-  rating       unrated (0xFF)          4.0★ (0.8)
-  first_played 2026-01-23 11:22        2026-01-23 11:22
-  last_played  2026-04-15 17:42        2026-08-01 13:55
-  added        2026-01-23 11:19        2026-01-23 11:19
+  field        foobar                  fooyin                  merged
+  play_count   54                      60                      60
+  rating       unrated (0xFF)          4.0★ (0.8)              4.0★ (0.8)
+  first_played 2026-01-23 11:22        2026-01-23 11:22        2026-01-23 11:22
+  last_played  2026-04-15 17:42        2026-08-01 13:55        2026-08-01 13:55
+  added        2026-01-23 11:19        2026-01-23 11:19        2026-01-23 11:19
   hash         f3cf30dd86e5…           f3cf30dd86e5…
   match        matched BY HASH ✓ (path-independent)
 ```
 
-The `hash` row shows the foobar-recomputed vs fooyin-stored `TrackHash`; the
-`match` row states whether the track resolved by hash or fell back to the tail.
+`merged` is what an import would write next — same merge rules, sidecar-aware.
+Here it equals `fooyin` because the track is already imported (re-running is a
+safe no-op); on a fresh track it shows foobar's plays added to fooyin's, earliest
+first/added and latest last. The `hash` row shows the foobar-recomputed vs
+fooyin-stored `TrackHash`, and `match` states whether it resolved by hash or fell
+back to the tail.
 
 Handy before an import (see what will change) and after (confirm it landed).
 

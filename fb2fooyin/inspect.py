@@ -10,13 +10,16 @@ import sqlite3
 import time
 
 from .core import (
+    FOOYIN_UNRATED,
     STATS_INDEX_GUID,
     fooyin_track_hash,
     parse_info_tags,
     parse_stats_blob,
     path_tail,
+    star_to_fooyin_rating,
     subsong_from_name,
 )
+from .importer import merge_one
 
 _FIELD_W = 13
 _FB_W = 24
@@ -81,6 +84,18 @@ def _gather_fooyin(fooyin_db: str, query: str) -> dict[str, dict]:
     conn = sqlite3.connect(f"file:{fooyin_db}?mode=ro", uri=True)
     out: dict[str, dict] = {}
     try:
+        # Previous per-hash contributions (sidecar may not exist yet), so the
+        # merged preview matches what an import would actually write.
+        prev: dict[str, int] = {}
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='_fb2fooyin_import'"
+        ).fetchone():
+            prev = {
+                h: c
+                for h, c in conn.execute(
+                    "SELECT TrackHash, ContributedPlayCount FROM _fb2fooyin_import"
+                )
+            }
         for path, h, added, first, last, pc, rating in conn.execute(
             "SELECT t.FilePath, t.TrackHash, s.AddedDate, s.FirstPlayed, "
             "s.LastPlayed, s.PlayCount, s.Rating "
@@ -95,6 +110,7 @@ def _gather_fooyin(fooyin_db: str, query: str) -> dict[str, dict]:
                     "last": last,
                     "pc": pc,
                     "rating": rating,
+                    "prev": prev.get(h, 0),
                     "path": path,
                 }
     finally:
@@ -102,8 +118,38 @@ def _gather_fooyin(fooyin_db: str, query: str) -> dict[str, dict]:
     return out
 
 
-def _row(field: str, fb: object, fy: object) -> str:
-    return f"  {field:<{_FIELD_W}}{str(fb):<{_FB_W}}{fy}"
+def _merged(stats, y: dict | None) -> tuple | None:
+    """The (added, first, last, pc, rating) an import would write for this
+    track, or None when there's no foobar entry to merge in."""
+    if stats is None:
+        return None
+    fb_rating = (
+        star_to_fooyin_rating(stats.rating_star) if stats.rating_star is not None else None
+    )
+    incoming = (
+        stats.added_ms,
+        stats.first_played_ms,
+        stats.last_played_ms,
+        stats.play_count,
+        fb_rating,
+    )
+    if y is None:
+        old = (None, None, None, 0, FOOYIN_UNRATED)
+        prev = 0
+    else:
+        old = (
+            y["added"],
+            y["first"],
+            y["last"],
+            y["pc"] or 0,
+            y["rating"] if y["rating"] is not None else FOOYIN_UNRATED,
+        )
+        prev = y["prev"]
+    return merge_one(old, incoming, prev)
+
+
+def _row(field: str, fb: object, fy: object, merged: object = "") -> str:
+    return f"  {field:<{_FIELD_W}}{str(fb):<{_FB_W}}{str(fy):<{_FB_W}}{merged}"
 
 
 def render(foobar_db: str, fooyin_db: str, query: str, limit: int) -> str:
@@ -119,16 +165,23 @@ def render(foobar_db: str, fooyin_db: str, query: str, limit: int) -> str:
         f = fb.get(tail)
         y = fy.get(tail)
         stats = f[0] if f else None
+        m = _merged(stats, y)  # (added, first, last, pc, rating) an import would write
         blocks.append(tail)
-        blocks.append(_row("field", "foobar", "fooyin"))
+        blocks.append(_row("field", "foobar", "fooyin", "merged"))
         blocks.append(
-            _row("play_count", stats.play_count if stats else "—", y["pc"] if y else "—")
+            _row(
+                "play_count",
+                stats.play_count if stats else "—",
+                y["pc"] if y else "—",
+                m[3] if m else "—",
+            )
         )
         blocks.append(
             _row(
                 "rating",
                 _foobar_rating(f[1]) if f else "—",
                 _fooyin_rating(y["rating"]) if y else "— (not in fooyin)",
+                _fooyin_rating(m[4]) if m else "—",
             )
         )
         blocks.append(
@@ -136,6 +189,7 @@ def render(foobar_db: str, fooyin_db: str, query: str, limit: int) -> str:
                 "first_played",
                 _fmt_ms(stats.first_played_ms) if stats else "—",
                 _fmt_ms(y["first"]) if y else "—",
+                _fmt_ms(m[1]) if m else "—",
             )
         )
         blocks.append(
@@ -143,6 +197,7 @@ def render(foobar_db: str, fooyin_db: str, query: str, limit: int) -> str:
                 "last_played",
                 _fmt_ms(stats.last_played_ms) if stats else "—",
                 _fmt_ms(y["last"]) if y else "—",
+                _fmt_ms(m[2]) if m else "—",
             )
         )
         blocks.append(
@@ -150,6 +205,7 @@ def render(foobar_db: str, fooyin_db: str, query: str, limit: int) -> str:
                 "added",
                 _fmt_ms(stats.added_ms) if stats else "—",
                 _fmt_ms(y["added"]) if y else "—",
+                _fmt_ms(m[0]) if m else "—",
             )
         )
         fb_hash = f[3] if f else None
@@ -161,7 +217,7 @@ def render(foobar_db: str, fooyin_db: str, query: str, limit: int) -> str:
             how = "matched BY TAIL (hashes differ)"
         else:
             how = "—"
-        blocks.append(_row("match", how, ""))
+        blocks.append(f"  {'match':<{_FIELD_W}}{how}")
         blocks.append("")
     if len(tails) > limit:
         blocks.append(f"… {len(tails) - limit} more (raise --limit to see them)")

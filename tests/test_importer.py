@@ -1,6 +1,7 @@
 import sqlite3
 
-from fb2fooyin.importer import _SIDECAR_DDL, plan_changes
+from fb2fooyin.core import FOOYIN_UNRATED
+from fb2fooyin.importer import _SIDECAR_DDL, merge_one, plan_changes
 
 
 def _fooyin_conn():
@@ -209,3 +210,27 @@ def test_hash_match_needs_no_tail():
     changes, unmatched, match = plan_changes(conn, [_hrecord(None, 2, hash="H1")])
     assert (match.by_hash, match.by_tail, match.unmatched) == (1, 0, 0)
     assert changes[0].track_hash == "H1"
+
+
+def test_merge_one_insert():
+    # empty fooyin row + foobar contribution -> the foobar values verbatim
+    old = (None, None, None, 0, FOOYIN_UNRATED)
+    assert merge_one(old, (500, 1000, 2000, 3, 0.8)) == (500, 1000, 2000, 3, 0.8)
+
+
+def test_merge_one_min_max_and_rating_keep():
+    # earliest first/added, latest last, additive pc; foobar has no rating so fooyin's survives
+    old = (9999, 5000, 5000, 10, 0.6)
+    assert merge_one(old, (500, 1000, 9000, 4, None)) == (500, 1000, 9000, 14, 0.6)
+
+
+def test_merge_one_idempotent_playcount():
+    # already contributed 4 of the current 7; re-applying foobar's 4 must stay 7
+    old = (500, 1000, 2000, 7, 0.8)
+    assert merge_one(old, (500, 1000, 2000, 4, 0.8), prev_contributed=4)[3] == 7
+
+
+def test_merge_one_keep_fooyin_rating():
+    old = (500, 1000, 2000, 5, 0.6)  # fooyin 3★
+    assert merge_one(old, (500, 1000, 2000, 1, 1.0), keep_fooyin_rating=True)[4] == 0.6
+    assert merge_one(old, (500, 1000, 2000, 1, 1.0))[4] == 1.0  # default: foobar wins

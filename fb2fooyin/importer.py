@@ -58,6 +58,40 @@ def _max_pos(*vals: int | None) -> int | None:
     return max(present) if present else None
 
 
+def merge_one(
+    old: tuple,
+    incoming: tuple,
+    prev_contributed: int = 0,
+    keep_fooyin_rating: bool = False,
+) -> tuple:
+    """Merge one foobar contribution into a fooyin stats row.
+
+    ``old``/``incoming``/return are ``(added, first, last, play, rating)``. This
+    is the single source of truth for the field merge rules — used by
+    ``plan_changes`` for the real write and by ``inspect`` for its preview.
+    """
+    cur_added, cur_first, cur_last, cur_pc, cur_rating = old
+    in_added, in_first, in_last, in_pc, in_rating = incoming
+
+    # Idempotent additive play count: back out our previous contribution so
+    # re-runs and growing foobar counts both land correctly, while plays fooyin
+    # itself recorded between runs survive.
+    new_pc = max(0, (cur_pc or 0) - prev_contributed + in_pc)
+    new_first = _min_pos(cur_first, in_first)
+    new_last = _max_pos(cur_last, in_last)
+    new_added = _min_pos(cur_added, in_added)
+    fooyin_rated = cur_rating is not None and cur_rating >= 0
+    if keep_fooyin_rating and fooyin_rated:
+        new_rating = cur_rating
+    elif in_rating is not None:
+        new_rating = in_rating
+    elif fooyin_rated:
+        new_rating = cur_rating
+    else:
+        new_rating = FOOYIN_UNRATED
+    return (new_added, new_first, new_last, new_pc, new_rating)
+
+
 # --- fooyin reads -------------------------------------------------------
 
 
@@ -194,30 +228,9 @@ def plan_changes(
     for h, a in agg.items():
         cur = stats.get(h)
         is_insert = cur is None
-        cur_added, cur_first, cur_last, cur_pc, cur_rating = (
-            cur if cur is not None else (None, None, None, 0, FOOYIN_UNRATED)
-        )
-        contributed = prev.get(h, 0)
-
-        # Idempotent additive play count: back out our previous contribution so
-        # re-runs and growing foobar counts both land correctly, while plays
-        # fooyin itself recorded between runs survive.
-        new_pc = max(0, (cur_pc or 0) - contributed + a["pc"])
-        new_first = _min_pos(cur_first, a["first"])
-        new_last = _max_pos(cur_last, a["last"])
-        new_added = _min_pos(cur_added, a["added"])
-        fooyin_rated = cur_rating is not None and cur_rating >= 0
-        if keep_fooyin_rating and fooyin_rated:
-            new_rating = cur_rating
-        elif a["rating"] is not None:
-            new_rating = a["rating"]
-        elif fooyin_rated:
-            new_rating = cur_rating
-        else:
-            new_rating = FOOYIN_UNRATED
-
-        new = (new_added, new_first, new_last, new_pc, new_rating)
-        old = (cur_added, cur_first, cur_last, cur_pc, cur_rating)
+        old = cur if cur is not None else (None, None, None, 0, FOOYIN_UNRATED)
+        incoming = (a["added"], a["first"], a["last"], a["pc"], a["rating"])
+        new = merge_one(old, incoming, prev.get(h, 0), keep_fooyin_rating)
         if is_insert or new != old:
             changes.append(Change(h, a["tail"], old, new, is_insert, a["pc"]))
     return changes, unmatched, match
