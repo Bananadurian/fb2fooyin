@@ -29,20 +29,49 @@ TrackHash → TrackStats`.
 
 ## Usage
 
+Run through [uv](https://docs.astral.sh/uv/) — it builds the (dependency-free)
+package into an isolated environment on first run, no manual venv needed:
+
 ```bash
 cd _tool/fb2fooyin
+uv sync                      # optional: create the environment up front
 
 # 1. Export foobar stats to JSON (reads data/metadb.sqlite by default, read-only)
-python3 -m fb2fooyin export --out stats.json
+uv run fb2fooyin export --out stats.json
 
 # 2. Preview the import (dry run — writes nothing). Close fooyin first.
-python3 -m fb2fooyin import --json stats.json
+uv run fb2fooyin import --json stats.json
 
 # 3. Apply for real (backs up fooyin.db first, refuses if fooyin is running)
-python3 -m fb2fooyin import --json stats.json --apply
+uv run fb2fooyin import --json stats.json --apply
 ```
 
 Defaults point at this library's paths, so bare `export` / `import` work too.
+No uv? The package is pure stdlib, so `python3 -m fb2fooyin …` works from this
+directory as a fallback.
+
+## Cross-checking a track (`inspect`)
+
+To manually confirm a specific song is consistent between the two players,
+`inspect` prints foobar and fooyin side by side (read-only, no writes). The
+query is a case-insensitive substring of the album-relative path:
+
+```bash
+uv run fb2fooyin inspect "hypnotize"
+```
+
+```
+xg/20260123_the core - 核 [e]_[qobuz-24-48-flac]/06. hypnotize.flac
+  field        foobar                  fooyin
+  play_count   54                      6
+  rating       unrated (0xFF)          4.0★ (0.8)
+  first_played 2026-01-23 11:22        2026-07-27 18:12
+  last_played  2026-04-15 17:42        2026-08-01 13:55
+  added        2026-01-23 11:19        2026-07-27 16:00
+  fooyin_hash  —                       f3cf30dd86e5d8f4240b10f034c3f5cd
+```
+
+Handy before an import (see what will change) and after (confirm it landed).
 
 ## Merge rules (import)
 
@@ -72,7 +101,7 @@ Existing fooyin rows are merged, not blindly overwritten:
 ## Tests
 
 ```bash
-python3 -m pytest tests/    # or the stdlib runner if pytest isn't installed
+uv run --with pytest pytest      # fetches pytest into an ephemeral env
 ```
 
 See [DESIGN.md](DESIGN.md) for the full database-schema and merge design.

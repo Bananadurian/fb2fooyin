@@ -8,6 +8,7 @@ import sys
 
 from . import export as export_mod
 from . import importer as import_mod
+from . import inspect as inspect_mod
 
 _DEFAULT_FOOBAR_DB = os.path.expanduser("~/11_music/_tool/fb2fooyin/data/metadb.sqlite")
 _DEFAULT_FOOYIN_DB = os.path.expanduser("~/.local/share/fooyin/fooyin.db")
@@ -62,6 +63,11 @@ def _cmd_import(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_inspect(args: argparse.Namespace) -> int:
+    print(inspect_mod.render(args.foobar_db, args.fooyin_db, args.query, args.limit))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="fb2fooyin",
@@ -80,6 +86,13 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument("--apply", action="store_true", help="actually write (default is dry-run)")
     pi.add_argument("--sample", type=int, default=10, help="sample rows to print")
     pi.set_defaults(func=_cmd_import)
+
+    pn = sub.add_parser("inspect", help="show foobar vs fooyin stats for a track (read-only)")
+    pn.add_argument("query", help="case-insensitive substring of the album-relative path")
+    pn.add_argument("--foobar-db", default=_DEFAULT_FOOBAR_DB)
+    pn.add_argument("--fooyin-db", default=_DEFAULT_FOOYIN_DB)
+    pn.add_argument("--limit", type=int, default=20, help="max matches to print")
+    pn.set_defaults(func=_cmd_inspect)
 
     return p
 

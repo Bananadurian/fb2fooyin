@@ -28,20 +28,47 @@ TrackStats` 链式解析。
 
 ## 用法
 
+通过 [uv](https://docs.astral.sh/uv/) 运行 —— 首次运行时它会把这个（零依赖）包
+构建进独立环境，无需手动建 venv：
+
 ```bash
 cd _tool/fb2fooyin
+uv sync                      # 可选：预先创建好环境
 
 # 1. 导出 foobar 统计到 JSON（默认读取 data/metadb.sqlite，只读）
-python3 -m fb2fooyin export --out stats.json
+uv run fb2fooyin export --out stats.json
 
 # 2. 预览导入（dry-run，不写入任何内容）。请先关闭 fooyin。
-python3 -m fb2fooyin import --json stats.json
+uv run fb2fooyin import --json stats.json
 
 # 3. 真正写入（先自动备份 fooyin.db；若 fooyin 正在运行则拒绝）
-python3 -m fb2fooyin import --json stats.json --apply
+uv run fb2fooyin import --json stats.json --apply
 ```
 
-默认路径已指向本库，直接 `export` / `import` 亦可。
+默认路径已指向本库，直接 `export` / `import` 亦可。没有 uv？本包纯标准库，可在此
+目录用 `python3 -m fb2fooyin …` 作为回退。
+
+## 人工核对单曲（`inspect`）
+
+想手动确认某首歌在两个播放器里是否一致，用 `inspect` 并排打印 foobar 与
+fooyin 的数据（只读，不写入）。查询是专辑相对路径的忽略大小写子串：
+
+```bash
+uv run fb2fooyin inspect "hypnotize"
+```
+
+```
+xg/20260123_the core - 核 [e]_[qobuz-24-48-flac]/06. hypnotize.flac
+  field        foobar                  fooyin
+  play_count   54                      6
+  rating       unrated (0xFF)          4.0★ (0.8)
+  first_played 2026-01-23 11:22        2026-07-27 18:12
+  last_played  2026-04-15 17:42        2026-08-01 13:55
+  added        2026-01-23 11:19        2026-07-27 16:00
+  fooyin_hash  —                       f3cf30dd86e5d8f4240b10f034c3f5cd
+```
+
+导入前（预看会变什么）与导入后（确认已写入）都好用。
 
 ## 合并规则（导入）
 
@@ -71,7 +98,7 @@ python3 -m fb2fooyin import --json stats.json --apply
 ## 测试
 
 ```bash
-python3 -m pytest tests/    # 若未装 pytest，可用标准库简易 runner
+uv run --with pytest pytest      # 临时环境拉取 pytest 运行
 ```
 
 更多设计细节见 [DESIGN.zh-CN.md](DESIGN.zh-CN.md)。
