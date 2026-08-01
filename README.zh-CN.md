@@ -79,7 +79,8 @@ xg/20260123_the core - 核 [e]_[qobuz-24-48-flac]/06. hypnotize.flac
   播放不会丢。
 - **FirstPlayed / AddedDate** —— 取更早的值。
 - **LastPlayed** —— 取更晚的值。
-- **Rating** —— foobar 已评分时以 foobar 为准，否则保留 fooyin 的。
+- **Rating** —— foobar 已评分时以 foobar 为准，否则保留 fooyin 的。加
+  `import --keep-fooyin-rating` 则绝不覆盖 fooyin 里已有的评分（foobar 仍会补空缺的）。
 - 时间戳为 0 表示“从未”，不会覆盖真实值。
 
 ## 安全性

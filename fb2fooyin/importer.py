@@ -95,8 +95,15 @@ def _load_prev_contrib(conn: sqlite3.Connection) -> dict[str, int]:
 # --- planning -----------------------------------------------------------
 
 
-def plan_changes(conn: sqlite3.Connection, records: list[dict]) -> tuple[list[Change], list[str]]:
+def plan_changes(
+    conn: sqlite3.Connection,
+    records: list[dict],
+    keep_fooyin_rating: bool = False,
+) -> tuple[list[Change], list[str]]:
     """Compute the merged TrackStats writes without touching the database.
+
+    With ``keep_fooyin_rating`` a rating already set in fooyin is never
+    overwritten by foobar (foobar still fills in ratings fooyin lacks).
 
     Returns ``(changes, unmatched_tails)``.
     """
@@ -153,9 +160,12 @@ def plan_changes(conn: sqlite3.Connection, records: list[dict]) -> tuple[list[Ch
         new_first = _min_pos(cur_first, a["first"])
         new_last = _max_pos(cur_last, a["last"])
         new_added = _min_pos(cur_added, a["added"])
-        if a["rating"] is not None:
+        fooyin_rated = cur_rating is not None and cur_rating >= 0
+        if keep_fooyin_rating and fooyin_rated:
+            new_rating = cur_rating
+        elif a["rating"] is not None:
             new_rating = a["rating"]
-        elif cur_rating is not None and cur_rating >= 0:
+        elif fooyin_rated:
             new_rating = cur_rating
         else:
             new_rating = FOOYIN_UNRATED

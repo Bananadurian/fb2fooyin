@@ -216,6 +216,9 @@ zip 内嵌（`unpack://zip|…`）、无磁盘流派路径的曲目。
 | `AddedDate` | 非零值取 `min` | ✔ |
 | `LastPlayed` | 取 `max` | ✔ |
 | `Rating` | foobar 已评分则用之，否则保留 fooyin | ✔ |
+
+`--keep-fooyin-rating` 会翻转评分优先级：fooyin 里已有的评分绝不被覆盖，但 foobar
+仍会补上 fooyin 缺的那些。
 | `PlayCount` | `现值 − 上次贡献 + foobar` | ✔ 借助旁路表 |
 
 `PlayCount` 是唯一不平凡的规则。朴素相加会在重跑时双计；朴素覆盖会丢掉 fooyin

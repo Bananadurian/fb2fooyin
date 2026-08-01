@@ -230,6 +230,10 @@ Existing fooyin rows are merged field-by-field, never blindly overwritten:
 | `AddedDate` | `min` of non-zero values | ✔ |
 | `LastPlayed` | `max` | ✔ |
 | `Rating` | foobar value if rated, else keep fooyin | ✔ |
+
+`--keep-fooyin-rating` flips the rating precedence: a rating already set in
+fooyin is never overwritten, though foobar still fills in the ones fooyin
+lacks.
 | `PlayCount` | `current − last_contribution + foobar` | ✔ via sidecar |
 
 The `PlayCount` rule is the only non-trivial one. Naive addition double-counts on

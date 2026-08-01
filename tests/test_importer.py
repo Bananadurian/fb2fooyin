@@ -112,6 +112,39 @@ def test_added_and_first_take_earlier():
     assert first == 1000
 
 
+def test_keep_fooyin_rating_flag():
+    conn = _fooyin_conn()
+    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    # fooyin already has a 3-star rating the user set
+    conn.execute(
+        "INSERT INTO TrackStats (TrackHash, AddedDate, FirstPlayed, LastPlayed, PlayCount, Rating)"
+        " VALUES ('H1', 500, 0, 0, 0, 0.6)"
+    )
+    conn.commit()
+    rec = [_record("a/al/01. s.flac", 1, star=5)]  # foobar says 5 stars
+
+    # default: foobar wins
+    changes, _ = plan_changes(conn, rec)
+    assert changes[0].new[4] == 1.0
+
+    # with the flag: fooyin's 3 stars is preserved
+    changes, _ = plan_changes(conn, rec, keep_fooyin_rating=True)
+    assert changes[0].new[4] == 0.6
+
+
+def test_keep_fooyin_rating_still_fills_empty():
+    conn = _fooyin_conn()
+    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    # fooyin unrated (-1.0); foobar has 4 stars -> flag still fills it
+    conn.execute(
+        "INSERT INTO TrackStats (TrackHash, AddedDate, FirstPlayed, LastPlayed, PlayCount, Rating)"
+        " VALUES ('H1', 500, 0, 0, 0, -1.0)"
+    )
+    conn.commit()
+    changes, _ = plan_changes(conn, [_record("a/al/01. s.flac", 1, star=4)], keep_fooyin_rating=True)
+    assert changes[0].new[4] == 0.8
+
+
 def test_unmatched_tail_reported():
     conn = _fooyin_conn()
     changes, unmatched = plan_changes(conn, [_record("nope/x/01. y.flac", 1)])

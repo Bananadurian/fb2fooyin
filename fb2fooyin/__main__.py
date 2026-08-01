@@ -39,7 +39,9 @@ def _cmd_import(args: argparse.Namespace) -> int:
     uri = f"file:{args.fooyin_db}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     try:
-        changes, unmatched = import_mod.plan_changes(conn, records)
+        changes, unmatched = import_mod.plan_changes(
+            conn, records, keep_fooyin_rating=args.keep_fooyin_rating
+        )
     finally:
         conn.close()
 
@@ -84,6 +86,11 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument("--json", default="stats.json")
     pi.add_argument("--fooyin-db", default=_DEFAULT_FOOYIN_DB)
     pi.add_argument("--apply", action="store_true", help="actually write (default is dry-run)")
+    pi.add_argument(
+        "--keep-fooyin-rating",
+        action="store_true",
+        help="never overwrite a rating already set in fooyin (foobar still fills empty ones)",
+    )
     pi.add_argument("--sample", type=int, default=10, help="sample rows to print")
     pi.set_defaults(func=_cmd_import)
 

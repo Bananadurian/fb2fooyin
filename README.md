@@ -83,6 +83,8 @@ Existing fooyin rows are merged, not blindly overwritten:
 - **FirstPlayed / AddedDate** — earliest known value wins.
 - **LastPlayed** — latest value wins.
 - **Rating** — foobar wins when it has a rating; otherwise fooyin's is kept.
+  Pass `import --keep-fooyin-rating` to never overwrite a rating already set in
+  fooyin (foobar still fills in the empty ones).
 - A zero timestamp means "never" and never overwrites a real one.
 
 ## Safety
