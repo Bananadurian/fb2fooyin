@@ -58,7 +58,7 @@ def _cmd_import(args: argparse.Namespace) -> int:
         print("\nDRY RUN — nothing written. Re-run with --apply to write.")
         return 0
 
-    backup = import_mod.apply_changes(args.fooyin_db, records, changes)
+    backup = import_mod.apply_changes(args.fooyin_db, changes)
     print(f"\napplied {len(changes)} changes. backup: {backup}")
     return 0
 

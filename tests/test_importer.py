@@ -34,7 +34,6 @@ def _apply_plan_in_memory(conn, records):
     """Mimic apply_changes against the in-memory db (no backup/lock)."""
     changes, unmatched = plan_changes(conn, records)
     now = 12345
-    rec_pc = {r["tail"]: r["play_count"] for r in records}
     for ch in changes:
         added, first, last, pc, rating = ch.new
         conn.execute(
@@ -50,7 +49,7 @@ def _apply_plan_in_memory(conn, records):
             " VALUES (?,?,?)"
             " ON CONFLICT(TrackHash) DO UPDATE SET ContributedPlayCount=excluded.ContributedPlayCount,"
             " ImportedAt=excluded.ImportedAt",
-            (ch.track_hash, rec_pc[ch.tail], now),
+            (ch.track_hash, ch.contributed, now),
         )
     conn.commit()
     return changes, unmatched
@@ -118,3 +117,25 @@ def test_unmatched_tail_reported():
     changes, unmatched = plan_changes(conn, [_record("nope/x/01. y.flac", 1)])
     assert changes == []
     assert unmatched == ["nope/x/01. y.flac"]
+
+
+def test_duplicate_copies_share_one_hash_sum_and_idempotent():
+    # Two physical copies of the same recording -> two tails, ONE TrackHash.
+    conn = _fooyin_conn()
+    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/copy1/01. s.flac', 'H1')")
+    conn.execute("INSERT INTO Tracks VALUES ('/x/11.20_rnb/a/copy2/01. s.flac', 'H1')")
+    recs = [
+        _record("a/copy1/01. s.flac", 4, first=1000, last=5000, added=500, star=None),
+        _record("a/copy2/01. s.flac", 3, first=800, last=9000, added=400, star=4),
+    ]
+    changes, _ = _apply_plan_in_memory(conn, recs)
+    # one row written, not two racing writes
+    assert len(changes) == 1
+    row = conn.execute(
+        "SELECT PlayCount, FirstPlayed, LastPlayed, AddedDate, Rating FROM TrackStats WHERE TrackHash='H1'"
+    ).fetchone()
+    assert row == (7, 800, 9000, 400, 0.8)  # 4+3, earliest, latest, earliest, 4★
+    # rerun must not double-count or flip-flop
+    _apply_plan_in_memory(conn, recs)
+    pc = conn.execute("SELECT PlayCount FROM TrackStats WHERE TrackHash='H1'").fetchone()[0]
+    assert pc == 7

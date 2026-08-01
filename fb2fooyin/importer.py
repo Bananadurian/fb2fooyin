@@ -30,9 +30,10 @@ CREATE TABLE IF NOT EXISTS {_SIDECAR} (
 class Change:
     track_hash: str
     tail: str
-    old: tuple  # (play, first, last, added, rating)
+    old: tuple  # (added, first, last, play, rating)
     new: tuple
     is_insert: bool
+    contributed: int  # aggregated foobar play count this run wrote (for the sidecar)
 
 
 # --- small merge helpers (0/None == "unknown") --------------------------
@@ -103,47 +104,66 @@ def plan_changes(conn: sqlite3.Connection, records: list[dict]) -> tuple[list[Ch
     stats = _load_trackstats(conn)
     prev = _load_prev_contrib(conn)
 
-    changes: list[Change] = []
+    # 1. Aggregate incoming records by the fooyin TrackHash they resolve to.
+    #    Duplicate physical copies of one recording share a single TrackHash
+    #    (fooyin dedups by content), so several records can target one row.
+    #    Combine them once here — otherwise they race to write the same row and
+    #    the result is non-deterministic and non-idempotent.
+    agg: dict[str, dict] = {}
     unmatched: list[str] = []
     for rec in records:
-        tail = rec["tail"]
-        hashes = tail_index.get(tail)
+        hashes = tail_index.get(rec["tail"])
         if not hashes:
-            unmatched.append(tail)
+            unmatched.append(rec["tail"])
             continue
-        rec_pc = rec["play_count"]
-        rec_first = rec["first_played_ms"]
-        rec_last = rec["last_played_ms"]
-        rec_added = rec["added_ms"]
         rec_star = rec["rating_star"]
         rec_rating = star_to_fooyin_rating(rec_star) if rec_star is not None else None
-
         for h in hashes:
-            cur = stats.get(h)
-            is_insert = cur is None
-            cur_added, cur_first, cur_last, cur_pc, cur_rating = (
-                cur if cur is not None else (None, None, None, 0, FOOYIN_UNRATED)
-            )
-            contributed = prev.get(h, 0)
-
-            # Idempotent additive play count: back out our previous contribution
-            # so re-runs and growing foobar counts both land correctly, while
-            # plays fooyin itself recorded between runs survive.
-            new_pc = max(0, (cur_pc or 0) - contributed + rec_pc)
-            new_first = _min_pos(cur_first, rec_first)
-            new_last = _max_pos(cur_last, rec_last)
-            new_added = _min_pos(cur_added, rec_added)
-            if rec_rating is not None:
-                new_rating = rec_rating
-            elif cur_rating is not None and cur_rating >= 0:
-                new_rating = cur_rating
+            a = agg.get(h)
+            if a is None:
+                agg[h] = {
+                    "pc": rec["play_count"],
+                    "first": rec["first_played_ms"],
+                    "last": rec["last_played_ms"],
+                    "added": rec["added_ms"],
+                    "rating": rec_rating,
+                    "tail": rec["tail"],
+                }
             else:
-                new_rating = FOOYIN_UNRATED
+                a["pc"] += rec["play_count"]  # summed copies (unplayed copies add 0)
+                a["first"] = _min_pos(a["first"], rec["first_played_ms"])
+                a["last"] = _max_pos(a["last"], rec["last_played_ms"])
+                a["added"] = _min_pos(a["added"], rec["added_ms"])
+                a["rating"] = _max_pos(a["rating"], rec_rating)
 
-            new = (new_added, new_first, new_last, new_pc, new_rating)
-            old = (cur_added, cur_first, cur_last, cur_pc, cur_rating)
-            if is_insert or new != old:
-                changes.append(Change(h, tail, old, new, is_insert))
+    # 2. Merge each hash against the current row + sidecar exactly once.
+    changes: list[Change] = []
+    for h, a in agg.items():
+        cur = stats.get(h)
+        is_insert = cur is None
+        cur_added, cur_first, cur_last, cur_pc, cur_rating = (
+            cur if cur is not None else (None, None, None, 0, FOOYIN_UNRATED)
+        )
+        contributed = prev.get(h, 0)
+
+        # Idempotent additive play count: back out our previous contribution so
+        # re-runs and growing foobar counts both land correctly, while plays
+        # fooyin itself recorded between runs survive.
+        new_pc = max(0, (cur_pc or 0) - contributed + a["pc"])
+        new_first = _min_pos(cur_first, a["first"])
+        new_last = _max_pos(cur_last, a["last"])
+        new_added = _min_pos(cur_added, a["added"])
+        if a["rating"] is not None:
+            new_rating = a["rating"]
+        elif cur_rating is not None and cur_rating >= 0:
+            new_rating = cur_rating
+        else:
+            new_rating = FOOYIN_UNRATED
+
+        new = (new_added, new_first, new_last, new_pc, new_rating)
+        old = (cur_added, cur_first, cur_last, cur_pc, cur_rating)
+        if is_insert or new != old:
+            changes.append(Change(h, a["tail"], old, new, is_insert, a["pc"]))
     return changes, unmatched
 
 
@@ -157,7 +177,7 @@ def _backup(fooyin_db: str) -> str:
     return dest
 
 
-def apply_changes(fooyin_db: str, records: list[dict], changes: list[Change]) -> str:
+def apply_changes(fooyin_db: str, changes: list[Change]) -> str:
     """Write changes inside one transaction. Returns the backup path.
 
     Refuses to run if fooyin holds the database lock.
@@ -175,7 +195,6 @@ def apply_changes(fooyin_db: str, records: list[dict], changes: list[Change]) ->
 
         conn.execute(_SIDECAR_DDL)
         now_ms = int(time.time() * 1000)
-        rec_pc_by_tail = {r["tail"]: r["play_count"] for r in records}
 
         for ch in changes:
             added, first, last, pc, rating = ch.new
@@ -201,7 +220,7 @@ def apply_changes(fooyin_db: str, records: list[dict], changes: list[Change]) ->
                     ContributedPlayCount = excluded.ContributedPlayCount,
                     ImportedAt           = excluded.ImportedAt
                 """,
-                (ch.track_hash, rec_pc_by_tail.get(ch.tail, 0), now_ms),
+                (ch.track_hash, ch.contributed, now_ms),
             )
         conn.commit()
     finally:

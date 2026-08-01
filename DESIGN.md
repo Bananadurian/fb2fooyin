@@ -248,6 +248,13 @@ new = current_playcount − previously_contributed + foobar_playcount
 A zero foobar timestamp is treated as "unknown" and never overwrites a real
 fooyin value.
 
+**Duplicate copies.** Several library copies of one recording share a single
+fooyin `TrackHash` (§3.2), so more than one export record can target the same
+stats row. They are aggregated by hash *before* the merge above — play counts
+summed (an unplayed backup copy adds 0), earliest first/added, latest last,
+highest rating — and the row is written once. Without this the records would
+race to write one row, giving a non-deterministic, non-idempotent result.
+
 ---
 
 ## 6. Safety model
