@@ -18,14 +18,17 @@ foobar2000 metadb.sqlite  ──export──▶  stats.json  ──import──�
         (read-only)                   (portable)              (transactional)
 ```
 
-- **export** = read the foobar stats out of an opaque BLOB and normalise them
-  into a stable, human-readable key/value form.
-- **import** = match those records to fooyin tracks and merge five fields into
-  fooyin's stats table.
+- **export** = read the foobar stats out of an opaque BLOB, read each track's
+  tags out of foobar's tag cache, and normalise them into a stable,
+  human-readable key/value form — including a **reproduced fooyin `TrackHash`**.
+- **import** = match those records to fooyin tracks — by content hash first,
+  path tail as fallback — and merge five fields into fooyin's stats table.
 
-The intermediate JSON is deliberately keyed by a *content-stable* identifier
-(the album-relative path tail), not by a database rowid or absolute path, so the
-export survives library reorganisation and the two stages stay decoupled.
+The intermediate JSON carries two *content-stable* identifiers per record: the
+reproduced fooyin **`TrackHash`** (primary — a hash of the tags, immune to any
+path change) and the **album-relative path tail** (fallback — for the few tracks
+whose hash can't be reproduced). Neither is a database rowid or absolute path,
+so the export survives library reorganisation and the two stages stay decoupled.
 
 Five fields are migrated: **play count, first played, last played, added date,
 rating**.
@@ -42,7 +45,7 @@ can query directly; it is a key/value store of opaque per-track BLOBs.
 | Table | Columns | Role |
 |---|---|---|
 | `config` | `key TEXT UNIQUE`, `value TEXT` | component version flags (`version`, `oldRatingsFixed`, `uniNormFix`) |
-| `metadb` | `name TEXT PK`, `info BLOB`, `infoBrowse BLOB`, `size`, `lastModified`, `infoBrowseTime`, `lastseen`, `created`, `attribs`, `attribsValid` | tag/technical cache per file (**not used** by this tool) |
+| `metadb` | `name TEXT PK`, `info BLOB`, `infoBrowse BLOB`, `size`, `lastModified`, `infoBrowseTime`, `lastseen`, `created`, `attribs`, `attribsValid` | tag/technical cache per file; **`info` is read for tags** to reproduce the fooyin hash (§2.5, §4) |
 | `metadb_indexes` | `name TEXT PK`, `synced INTEGER`, `retention INTEGER` | registry of the component indexes below |
 | `metadb_index_<GUID>` | `key INTEGER`, `filename TEXT UNIQUE PK` | maps an integer key ⇄ the track's location string |
 | `metadb_index_<GUID>_data` | `key INTEGER PK UNIQUE`, `value BLOB` | the per-track payload, joined to the name table on `key` |
@@ -106,6 +109,28 @@ Fixed **40 bytes**, little-endian. Verified against live data
   `*` 2★ (`0x6A`) is interpolated — no 2★ track exists in this library. Decoding
   uses nearest-anchor matching so a byte one tick off still resolves.
 
+### 2.5. `metadb.info` BLOB layout (tags)
+
+The `metadb` table's `info` BLOB is foobar's per-file tag cache. The tool reads
+it to reproduce the fooyin hash (§4). Joined to the stats index on
+`metadb.name = metadb_index_<GUID>.filename` (**26201/26201 rows join exactly**).
+
+After a binary header (replaygain floats, MusicBrainz ids, …) the tags are
+NUL-delimited tokens laid out as **`KEY \0 VALUE [\0 VALUE …] \0`** groups (an
+empty token terminates each group; a key with several values is multi-valued,
+e.g. two `ARTIST`s). Two quirks, both verified across formats and handled by
+`core.parse_info_tags`:
+
+- **Key case follows the source format.** FLAC/Vorbis keys are upper-case
+  (`TITLE`, `TRACKNUMBER`); MP4/m4a keys are lower-case (`title`, `tracknumber`).
+  Keys are therefore matched **case-insensitively**.
+- **The first tag (`ALBUM`) is glued to the header** with no NUL before it, so it
+  never appears as a clean token. It is recovered by its unique `ALBUM` suffix
+  (`ALBUM ARTIST` / `ALBUMARTISTSORT` do not end in it).
+
+Tag-less rips (some WAV) carry no readable tag tokens → empty fields → the record
+hash-misses and falls back to the tail (§4).
+
 ---
 
 ## 3. fooyin side — `fooyin.db`
@@ -128,8 +153,8 @@ Location: `~/.local/share/fooyin/fooyin.db`. A normal relational schema.
 | `TrackID` | INTEGER PK AUTOINCREMENT | |
 | `FilePath` | TEXT NOT NULL | absolute Linux path, lower-cased genre folders, e.g. `/home/xre/11_music/11.11_c-pop/…` |
 | `Subsong` | INTEGER DEFAULT 0 | always 0 in this library |
-| `TrackHash` | TEXT | **content-based** hash (artist/album/title/…), **not** derived from the path |
-| *(many tag/tech columns)* | | `Title`, `Artists`, `Album`, `Duration`, `Codec`, … — not used |
+| `TrackHash` | TEXT | **content-based** hash (artist/album/title/…), **not** derived from the path. The tool **reproduces** this hash from foobar's tags and matches on it (§4) |
+| *(many tag/tech columns)* | | `Title`, `Artists`, `Album`, … — **not read** on the fooyin side; the hash is reproduced from *foobar's* tags and compared to `TrackHash` |
 
 Key property (verified): the **same `TrackHash` appears at multiple different
 `FilePath`s** (duplicate album copies), confirming the hash is metadata-derived.
@@ -178,10 +203,39 @@ tables it does not know about; it travels with the db through backup/restore.
 
 ---
 
-## 4. The matching key — album-relative path tail
+## 4. The matching key — reproduced fooyin `TrackHash`, path tail as fallback
 
-The central design decision. The two libraries disagree on everything *above*
-the album:
+fooyin identifies a recording by a **content hash of its tags**, not its path, so
+the hash is immune to files being moved or renamed. Reproducing that hash from
+foobar's cached tags lets the tool match on identity; the album-relative path
+tail is kept only as a fallback for the few tracks whose hash can't be
+reproduced.
+
+### 4.1. Primary — the reproduced hash
+
+Verified against fooyin's source (`src/core/track.cpp` `Track::generateHash` +
+`include/utils/crypto.h` `Utils::generateHash`), the hash is the lower-case hex
+**MD5** of the UTF-8 concatenation (**no separator**) of, in order:
+
+```
+artists.join(",")  ++  album  ++  discNumber  ++  trackNumber  ++  title  ++  str(subsong)
+```
+
+— the **raw tag strings**, no case folding. `core.fooyin_track_hash` reproduces
+it; `core.parse_info_tags` supplies the fields from foobar's `metadb.info`
+(§2.5); subsong comes from the `N+` filename prefix (§2.3).
+
+Reproduced **100% (9740/9740)** against the live `fooyin.db` using fooyin's own
+stored fields — i.e. the algorithm is exact.
+
+> Edge case: fooyin falls back to `directory + filename` when the title is
+> empty. That can't be reproduced from foobar's Windows paths, so a title-less
+> track hash-misses and falls back to the tail.
+
+### 4.2. Fallback — album-relative path tail
+
+Kept for the residual the hash can't reproduce (§4.3). The two libraries
+disagree on everything *above* the album:
 
 | | foobar | fooyin |
 |---|---|---|
@@ -205,18 +259,30 @@ So the key is the **case-folded tail after the `11.NN_…` genre segment**:
 Implemented in `core.path_tail`: strip the `N+` subsong prefix, drop `file://`,
 normalise separators, lower-case, then take everything after the
 `/11.\d\d…/` genre folder. Paths with no genre folder (radio, zip-embedded)
-return `None` and are skipped.
+return `None` — such records can still match by hash.
 
-**Measured hit rate: 9729 / 9740 fooyin tracks (99.9%).** The 11 misses are all
-zip-embedded (`unpack://zip|…`) tracks with no on-disk genre path.
+### 4.3. Resolution order & measured coverage
 
-Because fooyin keys stats by `TrackHash`, import chains:
+Per record, import resolves to a fooyin `TrackHash` (`importer._resolve`):
 
 ```
-tail ──(fooyin Tracks)──▶ TrackHash ──▶ TrackStats
+hash in fooyin?  ──yes──▶  that TrackHash            (primary, path-independent)
+       └─no─▶  tail in fooyin Tracks?  ──yes──▶  TrackHash   (fallback)
+                     └─no─▶  unmatched (track absent from fooyin)
 ```
 
-The tool never needs to reproduce fooyin's hash algorithm.
+then `TrackHash ──▶ TrackStats`. Measured on this library (foobar **25 175**
+records vs fooyin **9 740** tracks):
+
+| Resolution | Count | Note |
+|---|---|---|
+| by hash | 24 909 | path-independent; **recovers ~1 134** tracks the tail alone misses (moved / renamed / reorganised) |
+| by tail (fallback) | 238 | all multi-artist m4a — foobar keeps the featured artists, fooyin stores only the primary, so the reproduced hashes differ |
+| unmatched | 28 | not in fooyin at all (deleted albums, radio) → correctly skipped |
+
+Combined coverage of the tracks present in both libraries: **100%, zero tail
+ambiguity.** Hash and tail are complementary — the hash survives the renames the
+tail can't, the tail covers the tag-parse residual the hash can't.
 
 ---
 
@@ -275,11 +341,15 @@ race to write one row, giving a non-deterministic, non-idempotent result.
 
 ## 7. Boundaries & non-goals
 
-- **No tag reading.** Matching is purely path-tail based; the tool never opens
-  audio files or parses foobar's `metadb.info` tag BLOBs.
-- **No hash reproduction.** fooyin's `TrackHash` is looked up, not recomputed.
-- **CUE / subsongs** are out of scope (this library has none; `Subsong` is
-  always 0). Supporting them would mean adding subsong to the matching key.
+- **No audio-file reading.** Tags come from foobar's `metadb.info` cache
+  (§2.5), never by opening the audio files — so export depends only on the
+  metadb and still works for files offloaded to cloud storage.
+- **Hash reproduction, not audio hashing.** fooyin's `TrackHash` is recomputed
+  from tags (§4.1); the tool never hashes audio content. Path-tail matching
+  remains as the fallback (§4.2).
+- **CUE / subsongs.** `subsong` is part of the reproduced hash (`str(subsong)`),
+  so multi-subsong tracks would hash correctly — but this library has none
+  (`Subsong` is always 0), so it is untested.
 - **One direction only** (foobar → fooyin). There is no fooyin → foobar path.
 - The Playback Statistics GUID is treated as a fixed constant for this
   library's `metadb.sqlite`; a different foobar profile could use a different

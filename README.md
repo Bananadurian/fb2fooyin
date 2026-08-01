@@ -20,12 +20,15 @@ No third-party dependencies — Python 3.10+ standard library only.
 
 ## How it matches tracks
 
-The two libraries have different roots, path separators and genre-folder case
-(`D:\11_MusicLib\11.11_C-Pop\…` vs `/home/xre/11_music/11.11_c-pop/…`), but the
-album-relative tail below the genre folder (`artist/album/file`) is identical.
-That case-folded tail is the join key (99.9% hit rate). fooyin keys its stats
-by a content-based `TrackHash`, so import resolves `tail → Tracks.FilePath →
-TrackHash → TrackStats`.
+fooyin identifies a recording by a **content hash of its tags** (`TrackHash`),
+not its path — so it survives files being moved or renamed. The tool reproduces
+that exact hash from foobar's cached tags and matches on it directly (~99% of
+tracks, and it recovers tracks whose paths since changed). For the small
+residual it can't reproduce (e.g. multi-artist m4a, where the two players read
+the artist list differently), it falls back to the **album-relative path tail**
+— the `artist/album/file` segment below the genre folder, identical across the
+two libraries despite different roots, separators and case. Combined coverage of
+tracks present in both libraries: 100%.
 
 ## Usage
 
@@ -63,13 +66,17 @@ uv run fb2fooyin inspect "hypnotize"
 ```
 xg/20260123_the core - 核 [e]_[qobuz-24-48-flac]/06. hypnotize.flac
   field        foobar                  fooyin
-  play_count   54                      6
+  play_count   54                      60
   rating       unrated (0xFF)          4.0★ (0.8)
-  first_played 2026-01-23 11:22        2026-07-27 18:12
+  first_played 2026-01-23 11:22        2026-01-23 11:22
   last_played  2026-04-15 17:42        2026-08-01 13:55
-  added        2026-01-23 11:19        2026-07-27 16:00
-  fooyin_hash  —                       f3cf30dd86e5d8f4240b10f034c3f5cd
+  added        2026-01-23 11:19        2026-01-23 11:19
+  hash         f3cf30dd86e5…           f3cf30dd86e5…
+  match        matched BY HASH ✓ (path-independent)
 ```
+
+The `hash` row shows the foobar-recomputed vs fooyin-stored `TrackHash`; the
+`match` row states whether the track resolved by hash or fell back to the tail.
 
 Handy before an import (see what will change) and after (confirm it landed).
 

@@ -36,6 +36,15 @@ class Change:
     contributed: int  # aggregated foobar play count this run wrote (for the sidecar)
 
 
+@dataclass
+class MatchStats:
+    """How the run's records resolved to fooyin tracks (for a transparent report)."""
+
+    by_hash: int = 0  # matched by recomputed fooyin TrackHash (path-independent)
+    by_tail: int = 0  # matched only by album-relative path tail (hash fallback)
+    unmatched: int = 0  # no hash and no tail hit (track absent from fooyin)
+
+
 # --- small merge helpers (0/None == "unknown") --------------------------
 
 
@@ -92,6 +101,34 @@ def _load_prev_contrib(conn: sqlite3.Connection) -> dict[str, int]:
     }
 
 
+def _load_fooyin_hashes(conn: sqlite3.Connection) -> set[str]:
+    """The set of fooyin content hashes, for primary (path-independent) matching."""
+    return {
+        h for (h,) in conn.execute(
+            "SELECT TrackHash FROM Tracks WHERE TrackHash IS NOT NULL"
+        )
+    }
+
+
+def _resolve(
+    rec: dict, fooyin_hashes: set[str], tail_index: dict[str, list[str]]
+) -> tuple[list[str], str | None]:
+    """Resolve a record to target fooyin TrackHash(es): hash first, then tail.
+
+    Returns ``(hashes, source)`` with ``source`` in ``{"hash", "tail", None}``.
+    A recomputed hash present in fooyin wins; otherwise fall back to the
+    album-relative path tail (which may resolve to several duplicate copies).
+    """
+    h = rec.get("hash")
+    if h and h in fooyin_hashes:
+        return [h], "hash"
+    tail = rec.get("tail")
+    tails = tail_index.get(tail) if tail else None
+    if tails:
+        return tails, "tail"
+    return [], None
+
+
 # --- planning -----------------------------------------------------------
 
 
@@ -99,14 +136,17 @@ def plan_changes(
     conn: sqlite3.Connection,
     records: list[dict],
     keep_fooyin_rating: bool = False,
-) -> tuple[list[Change], list[str]]:
+) -> tuple[list[Change], list[str], MatchStats]:
     """Compute the merged TrackStats writes without touching the database.
 
-    With ``keep_fooyin_rating`` a rating already set in fooyin is never
-    overwritten by foobar (foobar still fills in ratings fooyin lacks).
+    Each record is resolved to its fooyin TrackHash by content hash first, then
+    by album-relative path tail (see ``_resolve``). With ``keep_fooyin_rating`` a
+    rating already set in fooyin is never overwritten by foobar (foobar still
+    fills in ratings fooyin lacks).
 
-    Returns ``(changes, unmatched_tails)``.
+    Returns ``(changes, unmatched_tails, match_stats)``.
     """
+    fooyin_hashes = _load_fooyin_hashes(conn)
     tail_index = _build_tail_index(conn)
     stats = _load_trackstats(conn)
     prev = _load_prev_contrib(conn)
@@ -118,11 +158,17 @@ def plan_changes(
     #    the result is non-deterministic and non-idempotent.
     agg: dict[str, dict] = {}
     unmatched: list[str] = []
+    match = MatchStats()
     for rec in records:
-        hashes = tail_index.get(rec["tail"])
+        hashes, source = _resolve(rec, fooyin_hashes, tail_index)
         if not hashes:
-            unmatched.append(rec["tail"])
+            unmatched.append(rec.get("tail"))
+            match.unmatched += 1
             continue
+        if source == "hash":
+            match.by_hash += 1
+        else:
+            match.by_tail += 1
         rec_star = rec["rating_star"]
         rec_rating = star_to_fooyin_rating(rec_star) if rec_star is not None else None
         for h in hashes:
@@ -134,7 +180,7 @@ def plan_changes(
                     "last": rec["last_played_ms"],
                     "added": rec["added_ms"],
                     "rating": rec_rating,
-                    "tail": rec["tail"],
+                    "tail": rec.get("tail") or h,
                 }
             else:
                 a["pc"] += rec["play_count"]  # summed copies (unplayed copies add 0)
@@ -174,7 +220,7 @@ def plan_changes(
         old = (cur_added, cur_first, cur_last, cur_pc, cur_rating)
         if is_insert or new != old:
             changes.append(Change(h, a["tail"], old, new, is_insert, a["pc"]))
-    return changes, unmatched
+    return changes, unmatched, match
 
 
 # --- apply --------------------------------------------------------------

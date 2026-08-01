@@ -7,6 +7,7 @@ without touching either database.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import struct
 from dataclasses import dataclass
@@ -108,6 +109,109 @@ def parse_stats_blob(blob: bytes) -> Stats | None:
         added_ms=filetime_to_unix_ms(ft_added),
         rating_star=decode_rating(rating_byte),
     )
+
+
+# --- fooyin TrackHash reproduction --------------------------------------
+
+# fooyin identifies a recording by a content hash of its tags, not its path,
+# so the hash survives files being moved or renamed. Reproducing it lets us
+# match foobar stats to fooyin tracks by identity instead of by path.
+#
+# Verified against fooyin's source (src/core/track.cpp Track::generateHash +
+# include/utils/crypto.h Utils::generateHash): the hash is the lower-case hex
+# MD5 of the UTF-8 concatenation (NO separator) of, in order:
+#     artists joined by ","  ++  album  ++  discNumber  ++  trackNumber
+#     ++  title  ++  str(subsong)
+# using the raw tag strings (no case folding). Reproduced 100% against a live
+# fooyin.db.
+
+
+def fooyin_track_hash(
+    artists: list[str],
+    album: str,
+    disc: str,
+    track: str,
+    title: str,
+    subsong: int,
+) -> str:
+    """Recompute fooyin's content-based TrackHash from tag fields.
+
+    ``disc``/``track``/``album``/``title`` are the raw tag strings ("" if
+    absent); ``artists`` is the ordered list of ARTIST values.
+
+    Note: fooyin falls back to ``directory + filename`` when the title is empty.
+    We cannot reproduce that from foobar's Windows paths, so a title-less track
+    will hash-miss and fall back to path-tail matching.
+    """
+    payload = ",".join(artists) + album + disc + track + title + str(subsong)
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()
+
+
+def subsong_from_name(name: str) -> int:
+    """foobar metadb keys are ``<subsong>+<uri>`` (0 for normal single-song files)."""
+    head = name.split("+", 1)[0]
+    return int(head) if head.isdigit() else 0
+
+
+# --- foobar metadb.info tag BLOB ----------------------------------------
+
+# The per-file ``metadb.info`` BLOB stores tags as NUL-delimited tokens laid out
+# as ``KEY \0 VALUE [\0 VALUE ...] \0`` groups after a binary header. Two quirks,
+# both verified against the live metadb across formats:
+#   * Key case follows the source format's tag names — FLAC/Vorbis are
+#     upper-case (TITLE, TRACKNUMBER), MP4/m4a are lower-case (title,
+#     tracknumber). So keys are matched case-insensitively.
+#   * The alphabetically-first tag (always "ALBUM") is glued onto the end of the
+#     binary header with no NUL before it, so it never appears as a clean token.
+#     It is recovered via its unique "ALBUM" suffix (nothing else ends in it —
+#     "ALBUM ARTIST"/"ALBUMARTISTSORT" do not).
+
+
+def _decode(tok: bytes) -> str:
+    try:
+        return tok.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+
+
+def _collect_values(tokens: list[bytes], start: int) -> list[str]:
+    """Value tokens following a key, up to the empty-token group terminator."""
+    vals: list[str] = []
+    j = start
+    while j < len(tokens) and tokens[j] != b"":
+        vals.append(_decode(tokens[j]))
+        j += 1
+    return vals
+
+
+def parse_info_tags(blob: bytes) -> dict:
+    """Extract the tag fields fooyin hashes from a foobar ``metadb.info`` BLOB.
+
+    Returns ``{"artist": list[str], "album": str, "disc": str, "track": str,
+    "title": str}`` with "" / [] for anything absent (e.g. tag-less WAV rips).
+    """
+    tokens = bytes(blob).split(b"\x00")
+    out: dict = {"artist": [], "album": "", "disc": "", "track": "", "title": ""}
+    for i, tok in enumerate(tokens):
+        # ALBUM first: unique suffix, survives being glued to the header binary.
+        if not out["album"] and tok.upper().endswith(b"ALBUM") and i + 1 < len(tokens):
+            out["album"] = _decode(tokens[i + 1])
+        try:
+            key = tok.decode("utf-8").upper()
+        except UnicodeDecodeError:
+            continue
+        if key == "ARTIST" and not out["artist"]:
+            out["artist"] = _collect_values(tokens, i + 1)
+        elif key == "TITLE" and not out["title"]:
+            vals = _collect_values(tokens, i + 1)
+            out["title"] = vals[0] if vals else ""
+        elif key == "DISCNUMBER" and not out["disc"]:
+            vals = _collect_values(tokens, i + 1)
+            out["disc"] = vals[0] if vals else ""
+        elif key == "TRACKNUMBER" and not out["track"]:
+            vals = _collect_values(tokens, i + 1)
+            out["track"] = vals[0] if vals else ""
+    return out
 
 
 # --- Matching key: album-relative path tail -----------------------------

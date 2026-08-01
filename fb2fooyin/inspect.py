@@ -9,16 +9,30 @@ from __future__ import annotations
 import sqlite3
 import time
 
-from .core import STATS_INDEX_GUID, parse_stats_blob, path_tail
+from .core import (
+    STATS_INDEX_GUID,
+    fooyin_track_hash,
+    parse_info_tags,
+    parse_stats_blob,
+    path_tail,
+    subsong_from_name,
+)
 
 _FIELD_W = 13
 _FB_W = 24
+
+_EMPTY_TAGS = {"artist": [], "album": "", "disc": "", "track": "", "title": ""}
 
 
 def _fmt_ms(ms: int | None) -> str:
     if not ms:
         return "—"
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ms / 1000))
+
+
+def _short(h: str | None) -> str:
+    """Shorten a 32-hex hash so the two-column layout stays aligned."""
+    return f"{h[:12]}…" if h else "—"
 
 
 def _foobar_rating(blob: bytes) -> str:
@@ -40,14 +54,24 @@ def _gather_foobar(foobar_db: str, query: str) -> dict[str, tuple]:
     g = STATS_INDEX_GUID
     out: dict[str, tuple] = {}
     try:
-        for filename, blob in conn.execute(
-            f"SELECT n.filename, d.value FROM metadb_index_{g} n "
+        for filename, blob, info in conn.execute(
+            f"SELECT n.filename, d.value, m.info FROM metadb_index_{g} n "
             f"JOIN metadb_index_{g}_data d ON n.key = d.key "
+            f"JOIN metadb m ON m.name = n.filename "
             f"WHERE n.filename LIKE '%file://%'"
         ):
             tail = path_tail(filename)
             if tail and query in tail:
-                out[tail] = (parse_stats_blob(blob), blob, filename)
+                tags = parse_info_tags(info) if info else _EMPTY_TAGS
+                h = fooyin_track_hash(
+                    tags["artist"],
+                    tags["album"],
+                    tags["disc"],
+                    tags["track"],
+                    tags["title"],
+                    subsong_from_name(filename),
+                )
+                out[tail] = (parse_stats_blob(blob), blob, filename, h)
     finally:
         conn.close()
     return out
@@ -128,7 +152,16 @@ def render(foobar_db: str, fooyin_db: str, query: str, limit: int) -> str:
                 _fmt_ms(y["added"]) if y else "—",
             )
         )
-        blocks.append(_row("fooyin_hash", "—", y["hash"] if y else "—"))
+        fb_hash = f[3] if f else None
+        fy_hash = y["hash"] if y else None
+        blocks.append(_row("hash", _short(fb_hash), _short(fy_hash)))
+        if fb_hash and fy_hash and fb_hash == fy_hash:
+            how = "matched BY HASH ✓ (path-independent)"
+        elif f and y:
+            how = "matched BY TAIL (hashes differ)"
+        else:
+            how = "—"
+        blocks.append(_row("match", how, ""))
         blocks.append("")
     if len(tails) > limit:
         blocks.append(f"… {len(tails) - limit} more (raise --limit to see them)")

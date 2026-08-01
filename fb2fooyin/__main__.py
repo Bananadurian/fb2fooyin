@@ -19,8 +19,8 @@ def _cmd_export(args: argparse.Namespace) -> int:
     export_mod.write_json(payload, args.out)
     print(
         f"exported {payload['count']} records -> {args.out}\n"
-        f"  skipped (no genre tail): {payload['skipped_no_tail']}\n"
-        f"  skipped (bad blob):      {payload['skipped_bad_blob']}"
+        f"  no genre tail (hash-only):  {payload['no_tail']}\n"
+        f"  skipped (bad stats blob):   {payload['skipped_bad_blob']}"
     )
     return 0
 
@@ -39,7 +39,7 @@ def _cmd_import(args: argparse.Namespace) -> int:
     uri = f"file:{args.fooyin_db}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     try:
-        changes, unmatched = import_mod.plan_changes(
+        changes, unmatched, match = import_mod.plan_changes(
             conn, records, keep_fooyin_rating=args.keep_fooyin_rating
         )
     finally:
@@ -48,8 +48,11 @@ def _cmd_import(args: argparse.Namespace) -> int:
     inserts = sum(1 for c in changes if c.is_insert)
     updates = len(changes) - inserts
     print(
-        f"records: {len(records)}  matched-changes: {len(changes)} "
-        f"(insert {inserts}, update {updates})  unmatched: {len(unmatched)}"
+        f"records: {len(records)}  "
+        f"matched: {match.by_hash + match.by_tail} "
+        f"(by hash {match.by_hash}, by tail {match.by_tail})  "
+        f"unmatched: {match.unmatched}\n"
+        f"changes: {len(changes)} (insert {inserts}, update {updates})"
     )
     for c in changes[: args.sample]:
         print(_fmt(c))

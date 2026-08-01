@@ -32,7 +32,7 @@ def _record(tail, pc, first=1000, last=2000, added=500, star=5):
 
 def _apply_plan_in_memory(conn, records):
     """Mimic apply_changes against the in-memory db (no backup/lock)."""
-    changes, unmatched = plan_changes(conn, records)
+    changes, unmatched, _ = plan_changes(conn, records)
     now = 12345
     for ch in changes:
         added, first, last, pc, rating = ch.new
@@ -124,11 +124,11 @@ def test_keep_fooyin_rating_flag():
     rec = [_record("a/al/01. s.flac", 1, star=5)]  # foobar says 5 stars
 
     # default: foobar wins
-    changes, _ = plan_changes(conn, rec)
+    changes, _, _ = plan_changes(conn, rec)
     assert changes[0].new[4] == 1.0
 
     # with the flag: fooyin's 3 stars is preserved
-    changes, _ = plan_changes(conn, rec, keep_fooyin_rating=True)
+    changes, _, _ = plan_changes(conn, rec, keep_fooyin_rating=True)
     assert changes[0].new[4] == 0.6
 
 
@@ -141,15 +141,16 @@ def test_keep_fooyin_rating_still_fills_empty():
         " VALUES ('H1', 500, 0, 0, 0, -1.0)"
     )
     conn.commit()
-    changes, _ = plan_changes(conn, [_record("a/al/01. s.flac", 1, star=4)], keep_fooyin_rating=True)
+    changes, _, _ = plan_changes(conn, [_record("a/al/01. s.flac", 1, star=4)], keep_fooyin_rating=True)
     assert changes[0].new[4] == 0.8
 
 
 def test_unmatched_tail_reported():
     conn = _fooyin_conn()
-    changes, unmatched = plan_changes(conn, [_record("nope/x/01. y.flac", 1)])
+    changes, unmatched, match = plan_changes(conn, [_record("nope/x/01. y.flac", 1)])
     assert changes == []
     assert unmatched == ["nope/x/01. y.flac"]
+    assert (match.by_hash, match.by_tail, match.unmatched) == (0, 0, 1)
 
 
 def test_duplicate_copies_share_one_hash_sum_and_idempotent():
@@ -172,3 +173,39 @@ def test_duplicate_copies_share_one_hash_sum_and_idempotent():
     _apply_plan_in_memory(conn, recs)
     pc = conn.execute("SELECT PlayCount FROM TrackStats WHERE TrackHash='H1'").fetchone()[0]
     assert pc == 7
+
+
+def _hrecord(tail, pc, hash=None, **kw):
+    r = _record(tail, pc, **kw)
+    if hash is not None:
+        r["hash"] = hash
+    return r
+
+
+def test_hash_match_takes_priority_over_tail():
+    conn = _fooyin_conn()
+    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    # tail points nowhere, but the recomputed hash is H1 -> matches by hash (robust to rename)
+    changes, unmatched, match = plan_changes(conn, [_hrecord("renamed/moved/99. gone.flac", 4, hash="H1")])
+    assert unmatched == []
+    assert (match.by_hash, match.by_tail) == (1, 0)
+    assert changes[0].track_hash == "H1" and changes[0].new[3] == 4
+
+
+def test_tail_fallback_when_hash_absent_in_fooyin():
+    conn = _fooyin_conn()
+    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    # recomputed hash not in fooyin (e.g. multi-artist m4a) -> falls back to tail
+    changes, unmatched, match = plan_changes(conn, [_hrecord("a/al/01. s.flac", 3, hash="NOTINFOOYIN")])
+    assert unmatched == []
+    assert (match.by_hash, match.by_tail) == (0, 1)
+    assert changes[0].track_hash == "H1"
+
+
+def test_hash_match_needs_no_tail():
+    conn = _fooyin_conn()
+    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    # radio/zip entry: no tail at all, still matches by content hash
+    changes, unmatched, match = plan_changes(conn, [_hrecord(None, 2, hash="H1")])
+    assert (match.by_hash, match.by_tail, match.unmatched) == (1, 0, 0)
+    assert changes[0].track_hash == "H1"

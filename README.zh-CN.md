@@ -19,12 +19,12 @@ foobar2000 的 `foo_playcount` 组件把统计存在 `metadb.sqlite` 里，fooyi
 
 ## 如何匹配曲目
 
-两个库的根路径、路径分隔符、流派目录大小写都不同
-（`D:\11_MusicLib\11.11_C-Pop\…` 对 `/home/xre/11_music/11.11_c-pop/…`），
-但流派目录**以下**的相对部分（`艺人/专辑/文件名`）完全一致。工具即以这段忽略
-大小写的“路径尾部”作为匹配键（实测命中率 99.9%）。fooyin 的统计是按内容型
-`TrackHash` 存储的，因此导入时按 `尾部 → Tracks.FilePath → TrackHash →
-TrackStats` 链式解析。
+fooyin 用**标签的内容哈希**（`TrackHash`）而非路径来标识一段录音 —— 因此文件
+移动/改名都不受影响。工具从 foobar 缓存的标签**精确复刻**这个哈希并据此直接匹配
+（约 99% 的曲目，还能救回路径已变更的曲目）。对少数无法复刻的残差（如多艺人
+m4a，两个播放器读取艺人列表的方式不同），回退到**专辑相对路径尾部** —— 即流派
+目录以下的 `艺人/专辑/文件名` 段，尽管两库的根路径、分隔符、大小写都不同，这一段
+完全一致。对两库都存在的曲目，合并覆盖率 100%。
 
 ## 用法
 
@@ -60,13 +60,17 @@ uv run fb2fooyin inspect "hypnotize"
 ```
 xg/20260123_the core - 核 [e]_[qobuz-24-48-flac]/06. hypnotize.flac
   field        foobar                  fooyin
-  play_count   54                      6
+  play_count   54                      60
   rating       unrated (0xFF)          4.0★ (0.8)
-  first_played 2026-01-23 11:22        2026-07-27 18:12
+  first_played 2026-01-23 11:22        2026-01-23 11:22
   last_played  2026-04-15 17:42        2026-08-01 13:55
-  added        2026-01-23 11:19        2026-07-27 16:00
-  fooyin_hash  —                       f3cf30dd86e5d8f4240b10f034c3f5cd
+  added        2026-01-23 11:19        2026-01-23 11:19
+  hash         f3cf30dd86e5…           f3cf30dd86e5…
+  match        matched BY HASH ✓ (path-independent)
 ```
+
+`hash` 行是 foobar 重算 vs fooyin 存储的 `TrackHash`；`match` 行说明该曲是按
+哈希匹配、还是回退到了尾部。
 
 导入前（预看会变什么）与导入后（确认已写入）都好用。
 

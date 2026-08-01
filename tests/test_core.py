@@ -3,9 +3,12 @@ import struct
 from fb2fooyin.core import (
     decode_rating,
     filetime_to_unix_ms,
+    fooyin_track_hash,
+    parse_info_tags,
     parse_stats_blob,
     path_tail,
     star_to_fooyin_rating,
+    subsong_from_name,
 )
 
 
@@ -73,3 +76,95 @@ def test_path_tail_windows_and_unix_match():
 
 def test_path_tail_no_genre_returns_none():
     assert path_tail("file:///home/xre/music/random/x.flac") is None
+
+
+# --- fooyin TrackHash reproduction (anchored to real fooyin.db values) ----
+
+
+def test_fooyin_track_hash_multi_artist():
+    # XG - UNDEFEATED (ARTIST = XG, VALORANT), verified against the live fooyin.db
+    assert (
+        fooyin_track_hash(["XG", "VALORANT"], "UNDEFEATED", "1", "1", "UNDEFEATED", 0)
+        == "a8dccc8a8b87fd5b71693cef2697e02b"
+    )
+
+
+def test_fooyin_track_hash_single_artist():
+    # 方大同 - XZMHXDXH (m4a), verified against the live fooyin.db
+    assert (
+        fooyin_track_hash(["方大同"], "梦想家 The Dreamer", "1", "1", "XZMHXDXH", 0)
+        == "40aed3a2d3ef6c69fbf8b3fbb7b0100b"
+    )
+
+
+def test_fooyin_track_hash_joins_artists_with_comma_no_separator():
+    # concatenation is artists.join(",") + album + disc + track + title + subsong, no delimiter
+    import hashlib
+
+    expected = hashlib.md5("A,B" "Al" "1" "2" "T" "0".encode()).hexdigest()
+    assert fooyin_track_hash(["A", "B"], "Al", "1", "2", "T", 0) == expected
+
+
+def test_subsong_from_name():
+    assert subsong_from_name("0+file://D:\\x.flac") == 0
+    assert subsong_from_name("9+file://D:\\cue.flac") == 9
+    assert subsong_from_name("file://no-prefix") == 0
+
+
+# --- foobar metadb.info tag parsing --------------------------------------
+
+
+def _info(*groups: list[bytes]) -> bytes:
+    """Build a metadb.info-style blob: KEY \\0 VALUE... \\0 (empty terminator)."""
+    toks: list[bytes] = []
+    for g in groups:
+        toks.extend(g)
+        toks.append(b"")  # group terminator
+    return b"\x00".join(toks)
+
+
+def test_parse_info_flac_uppercase_keys_and_glued_album():
+    # ALBUM (alphabetically first) is glued to the binary header with no NUL.
+    header = b"\x80\xbf\x8f\x8d"
+    blob = _info(
+        [header + b"ALBUM", b"My Album"],
+        [b"ALBUM ARTIST", b"AA"],
+        [b"ARTIST", b"A1", b"A2"],
+        [b"DISCNUMBER", b"1"],
+        [b"TITLE", b"My Title"],
+        [b"TRACKNUMBER", b"3"],
+    )
+    tags = parse_info_tags(blob)
+    assert tags["album"] == "My Album"  # recovered despite gluing
+    assert tags["artist"] == ["A1", "A2"]  # ARTIST, not ALBUM ARTIST
+    assert tags["disc"] == "1"
+    assert tags["track"] == "3"
+    assert tags["title"] == "My Title"
+
+
+def test_parse_info_m4a_lowercase_keys():
+    header = b"\x83\x3f"  # ends in '?' before the glued ALBUM
+    blob = _info(
+        [header + b"ALBUM", b"MP4 Album"],
+        [b"album artist", b"AA"],
+        [b"artist", b"Solo"],
+        [b"discnumber", b"1"],
+        [b"title", b"MP4 Title"],
+        [b"tracknumber", b"2"],
+    )
+    tags = parse_info_tags(blob)
+    assert tags["album"] == "MP4 Album"
+    assert tags["artist"] == ["Solo"]
+    assert tags["disc"] == "1"
+    assert tags["track"] == "2"
+    assert tags["title"] == "MP4 Title"
+
+
+def test_parse_info_tagless_blob_is_all_empty():
+    assert parse_info_tags(b"") == {
+        "artist": [],
+        "album": "",
+        "disc": "",
+        "track": "",
+        "title": "",
+    }

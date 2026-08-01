@@ -17,12 +17,16 @@ foobar2000 metadb.sqlite  ──export──▶  stats.json  ──import──�
         （只读）                       （可移植）              （事务写入）
 ```
 
-- **export**＝把 foobar 藏在不透明 BLOB 里的统计读出来，归一化成稳定、可读的
-  键值形式。
-- **import**＝把这些记录匹配到 fooyin 曲目，并将 5 个字段合并进 fooyin 的统计表。
+- **export**＝把 foobar 藏在不透明 BLOB 里的统计读出来，再从 foobar 的标签缓存里
+  读出每曲的标签，一起归一化成稳定、可读的键值形式 —— 其中包含**复刻出的
+  fooyin `TrackHash`**。
+- **import**＝把这些记录匹配到 fooyin 曲目 —— 先按内容 hash、再以路径尾部兜底 ——
+  并将 5 个字段合并进 fooyin 的统计表。
 
-中间 JSON 刻意以*内容稳定*的标识（专辑相对路径尾部）为键，而非数据库 rowid 或
-绝对路径，从而在音乐库重组后仍然有效，也让两个阶段彼此解耦。
+中间 JSON 每条记录携带两个*内容稳定*的标识：复刻出的 fooyin **`TrackHash`**
+（主键 —— 标签的哈希，对任何路径变更免疫）与**专辑相对路径尾部**（兜底 —— 给少数
+无法复刻哈希的曲目）。两者都不是数据库 rowid 或绝对路径，从而在音乐库重组后仍然
+有效，也让两个阶段彼此解耦。
 
 迁移的 5 个字段：**播放次数、首次播放、最近播放、添加时间、评分**。
 
@@ -38,7 +42,7 @@ foobar2000 metadb.sqlite  ──export──▶  stats.json  ──import──�
 | 表 | 列 | 作用 |
 |---|---|---|
 | `config` | `key TEXT UNIQUE`、`value TEXT` | 组件版本标志（`version`、`oldRatingsFixed`、`uniNormFix`） |
-| `metadb` | `name TEXT PK`、`info BLOB`、`infoBrowse BLOB`、`size`、`lastModified`、`infoBrowseTime`、`lastseen`、`created`、`attribs`、`attribsValid` | 每文件的标签/技术信息缓存（本工具**不使用**） |
+| `metadb` | `name TEXT PK`、`info BLOB`、`infoBrowse BLOB`、`size`、`lastModified`、`infoBrowseTime`、`lastseen`、`created`、`attribs`、`attribsValid` | 每文件的标签/技术信息缓存；**`info` 被读取取标签**以复刻 fooyin 哈希（§2.5、§4） |
 | `metadb_indexes` | `name TEXT PK`、`synced INTEGER`、`retention INTEGER` | 下列各组件索引的注册表 |
 | `metadb_index_<GUID>` | `key INTEGER`、`filename TEXT UNIQUE PK` | 整数 key ⇄ 曲目位置字符串 的映射 |
 | `metadb_index_<GUID>_data` | `key INTEGER PK UNIQUE`、`value BLOB` | 每曲负载，按 `key` 与名字表关联 |
@@ -97,6 +101,25 @@ foobar2000 metadb.sqlite  ──export──▶  stats.json  ──import──�
   `*` 2★（`0x6A`）是外推值 —— 本库不存在 2★ 曲目。解码采用最近锚点匹配，因此
   即便字节偏离锚点一格仍能正确解析。
 
+### 2.5. `metadb.info` BLOB 布局（标签）
+
+`metadb` 表的 `info` BLOB 是 foobar 每文件的标签缓存。工具读取它以复刻 fooyin
+哈希（§4）。按 `metadb.name = metadb_index_<GUID>.filename` 与统计索引关联
+（**26201/26201 行精确关联**）。
+
+在一段二进制头（replaygain 浮点、MusicBrainz id…）之后，标签是以 NUL 分隔的
+token，排布为 **`KEY \0 值 [\0 值 …] \0`** 的分组（空 token 终结一组；一个键可有
+多个值，如两个 `ARTIST`）。两个坑，均已跨格式核实，由 `core.parse_info_tags`
+处理：
+
+- **键名大小写随源格式变。** FLAC/Vorbis 键为大写（`TITLE`、`TRACKNUMBER`）；
+  MP4/m4a 键为小写（`title`、`tracknumber`）。故键名**大小写不敏感**匹配。
+- **首个标签（`ALBUM`）粘在二进制头上**，前面没有 NUL，从不作为干净 token 出现。
+  靠其唯一后缀 `ALBUM` 识别（`ALBUM ARTIST` / `ALBUMARTISTSORT` 都不以它结尾）。
+
+无标签的抓轨（部分 WAV）读不出标签 token → 字段全空 → 该记录哈希失配，回退到
+尾部（§4）。
+
 ---
 
 ## 3. fooyin 侧 —— `fooyin.db`
@@ -119,8 +142,8 @@ foobar2000 metadb.sqlite  ──export──▶  stats.json  ──import──�
 | `TrackID` | INTEGER PK AUTOINCREMENT | |
 | `FilePath` | TEXT NOT NULL | 绝对 Linux 路径，流派目录小写，如 `/home/xre/11_music/11.11_c-pop/…` |
 | `Subsong` | INTEGER DEFAULT 0 | 本库恒为 0 |
-| `TrackHash` | TEXT | **内容型** hash（艺人/专辑/标题…），**不**由路径导出 |
-| *（大量标签/技术列）* | | `Title`、`Artists`、`Album`、`Duration`、`Codec`… —— 不使用 |
+| `TrackHash` | TEXT | **内容型** hash（艺人/专辑/标题…），**不**由路径导出。工具从 foobar 的标签**复刻**此哈希并据此匹配（§4） |
+| *（大量标签/技术列）* | | `Title`、`Artists`、`Album`… —— fooyin 侧**不读取**；哈希是从 *foobar* 的标签复刻后与 `TrackHash` 比对 |
 
 关键性质（已验证）：**同一个 `TrackHash` 出现在多个不同 `FilePath`**（专辑重复
 副本），证明 hash 由元数据导出。约束 `UNIQUE(FilePath, Offset, Subsong)`。
@@ -167,9 +190,35 @@ CREATE TABLE _fb2fooyin_import (
 
 ---
 
-## 4. 匹配键 —— 专辑相对路径尾部
+## 4. 匹配键 —— 复刻的 fooyin `TrackHash`，路径尾部兜底
 
-核心设计决策。两个库在专辑*以上*的一切都不同：
+fooyin 用**标签的内容哈希**（而非路径）标识一段录音，因此该哈希对文件移动/改名
+免疫。从 foobar 缓存的标签复刻出这个哈希，就能按身份匹配；专辑相对路径尾部仅作为
+少数无法复刻哈希曲目的兜底。
+
+### 4.1. 主键 —— 复刻的哈希
+
+已对照 fooyin 源码核实（`src/core/track.cpp` `Track::generateHash` +
+`include/utils/crypto.h` `Utils::generateHash`）：该哈希是下列各项按顺序做 UTF-8
+拼接（**无分隔符**）后的小写十六进制 **MD5**：
+
+```
+artists.join(",")  ++  album  ++  discNumber  ++  trackNumber  ++  title  ++  str(subsong)
+```
+
+—— 用**原始标签串**，不做大小写归一。`core.fooyin_track_hash` 复刻它；
+`core.parse_info_tags` 从 foobar 的 `metadb.info`（§2.5）提供字段；subsong 取自
+`N+` 文件名前缀（§2.3）。
+
+用 fooyin 自身存储的字段对活库 `fooyin.db` 复刻，**100%（9740/9740）**吻合 ——
+即算法精确。
+
+> 边界：当 title 为空时 fooyin 会回退成 `目录 + 文件名`。这无法从 foobar 的
+> Windows 路径复刻，因此无标题曲目会哈希失配、回退到尾部。
+
+### 4.2. 兜底 —— 专辑相对路径尾部
+
+留给哈希复刻不了的残差（§4.3）。两个库在专辑*以上*的一切都不同：
 
 | | foobar | fooyin |
 |---|---|---|
@@ -191,18 +240,29 @@ CREATE TABLE _fb2fooyin_import (
 
 实现于 `core.path_tail`：剥掉 `N+` 子歌曲前缀、去掉 `file://`、归一化分隔符、
 转小写，再取流派目录 `/11.\d\d…/` 之后的部分。不含流派目录的路径（电台、
-zip 内嵌）返回 `None` 并被跳过。
+zip 内嵌）返回 `None` —— 这类记录仍可按哈希匹配。
 
-**实测命中率：fooyin 9740 首中 9729 首（99.9%）。** 未命中的 11 首全是
-zip 内嵌（`unpack://zip|…`）、无磁盘流派路径的曲目。
+### 4.3. 解析顺序与实测覆盖
 
-由于 fooyin 以 `TrackHash` 存储统计，导入链式解析：
+每条记录，导入按此解析到 fooyin `TrackHash`（`importer._resolve`）：
 
 ```
-尾部 ──(fooyin Tracks)──▶ TrackHash ──▶ TrackStats
+哈希在 fooyin 里？ ──是──▶  该 TrackHash          （主键，与路径无关）
+       └─否─▶  尾部在 fooyin Tracks 里？ ──是──▶  TrackHash   （兜底）
+                     └─否─▶  未匹配（fooyin 里根本不存在）
 ```
 
-工具无需复现 fooyin 的 hash 算法。
+然后 `TrackHash ──▶ TrackStats`。在本库实测（foobar **25 175** 条记录 vs
+fooyin **9 740** 曲）：
+
+| 解析方式 | 数量 | 说明 |
+|---|---|---|
+| 按哈希 | 24 909 | 与路径无关；**额外救回约 1 134** 首尾部匹配不到的（移动/改名/重组） |
+| 按尾部（兜底） | 238 | 全是多艺人 m4a —— foobar 保留了 featured 艺人、fooyin 只存主艺人，故复刻的哈希不同 |
+| 未匹配 | 28 | fooyin 里根本不存在（已删专辑、电台）→ 正确跳过 |
+
+对两个库都存在的曲目，哈希+尾部合并覆盖：**100%，尾部零歧义。** 哈希与尾部互补
+—— 哈希能扛住尾部扛不住的改名，尾部能覆盖哈希覆盖不了的标签解析残差。
 
 ---
 
@@ -255,11 +315,12 @@ foobar 时间戳为 0 视作“未知”，绝不覆盖 fooyin 的真实值。
 
 ## 7. 边界与非目标
 
-- **不读标签。** 匹配纯基于路径尾部；工具从不打开音频文件，也不解析 foobar 的
-  `metadb.info` 标签 BLOB。
-- **不复现 hash。** fooyin 的 `TrackHash` 是查出来的，不是算出来的。
-- **CUE / 子歌曲**不在范围内（本库没有，`Subsong` 恒为 0）。若要支持，需把子歌曲
-  纳入匹配键。
+- **不读音频文件。** 标签来自 foobar 的 `metadb.info` 缓存（§2.5），从不打开音频
+  文件 —— 因此导出只依赖 metadb，对已转移到网盘的文件也照常工作。
+- **复刻哈希，而非音频哈希。** fooyin 的 `TrackHash` 是从标签重算的（§4.1），工具
+  从不对音频内容做哈希。路径尾部匹配保留为兜底（§4.2）。
+- **CUE / 子歌曲。** `subsong` 是复刻哈希的一部分（`str(subsong)`），故多子歌曲曲目
+  能正确哈希 —— 但本库没有（`Subsong` 恒为 0），因此未经测试。
 - **单向**（foobar → fooyin），没有 fooyin → foobar 的反向路径。
 - 播放统计 GUID 被当作本库 `metadb.sqlite` 的固定常量；不同的 foobar 配置可能使用
   不同 GUID，届时需更新 `core.STATS_INDEX_GUID`。
