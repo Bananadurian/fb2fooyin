@@ -32,10 +32,8 @@ TrackHash → TrackStats`.
 ```bash
 cd _tool/fb2fooyin
 
-# 1. Export foobar stats to JSON (read-only on metadb.sqlite)
-python3 -m fb2fooyin export \
-    --foobar-db /home/xre/11_music/_tool/metadb.sqlite \
-    --out stats.json
+# 1. Export foobar stats to JSON (reads data/metadb.sqlite by default, read-only)
+python3 -m fb2fooyin export --out stats.json
 
 # 2. Preview the import (dry run — writes nothing). Close fooyin first.
 python3 -m fb2fooyin import --json stats.json

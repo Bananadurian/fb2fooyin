@@ -9,7 +9,7 @@ import sys
 from . import export as export_mod
 from . import importer as import_mod
 
-_DEFAULT_FOOBAR_DB = os.path.expanduser("~/11_music/_tool/metadb.sqlite")
+_DEFAULT_FOOBAR_DB = os.path.expanduser("~/11_music/_tool/fb2fooyin/data/metadb.sqlite")
 _DEFAULT_FOOYIN_DB = os.path.expanduser("~/.local/share/fooyin/fooyin.db")
 
 

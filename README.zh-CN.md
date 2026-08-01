@@ -31,10 +31,8 @@ TrackStats` 链式解析。
 ```bash
 cd _tool/fb2fooyin
 
-# 1. 导出 foobar 统计到 JSON（对 metadb.sqlite 只读）
-python3 -m fb2fooyin export \
-    --foobar-db /home/xre/11_music/_tool/metadb.sqlite \
-    --out stats.json
+# 1. 导出 foobar 统计到 JSON（默认读取 data/metadb.sqlite，只读）
+python3 -m fb2fooyin export --out stats.json
 
 # 2. 预览导入（dry-run，不写入任何内容）。请先关闭 fooyin。
 python3 -m fb2fooyin import --json stats.json

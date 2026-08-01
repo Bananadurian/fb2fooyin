@@ -13,6 +13,10 @@ stats.json
 *.bak-*
 fooyin.db.bak-*
 
+# Local foobar source database (large, user-specific) — keep the folder, ignore contents
+data/*
+!data/.gitkeep
+
 # Tooling caches
 .pytest_cache/
 .mypy_cache/
