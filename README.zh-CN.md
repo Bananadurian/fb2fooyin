@@ -4,8 +4,14 @@
 
 将 foobar2000 的播放统计迁移到 Linux 上的 [fooyin](https://www.fooyin.org/)。
 
-foobar2000 的 `foo_playcount` 组件把统计存在 `metadb.sqlite` 里，fooyin 则存在
-`~/.local/share/fooyin/fooyin.db`。本工具迁移其中 5 个字段：
+foobar2000 的 [`foo_playcount`](https://wiki.hydrogenaudio.org/index.php?title=Foobar2000:Components/Playback_Statistics_v3.x_%28foo_playcount%29)
+组件把统计存在 `metadb.sqlite` 里，该文件位于 foobar2000 的 **profile** 文件夹：
+
+- **便携版**安装 —— `<安装目录>\profile`，如 `D:\foobar2000\profile`
+- **标准版**安装 —— `%APPDATA%\foobar2000\profile`，即
+  `C:\Users\<用户>\AppData\Roaming\foobar2000\profile`
+
+fooyin 则存在 `~/.local/share/fooyin/fooyin.db`。本工具迁移其中 5 个字段：
 
 | fooyin 列 | foobar 来源 |
 |---|---|
@@ -16,6 +22,8 @@ foobar2000 的 `foo_playcount` 组件把统计存在 `metadb.sqlite` 里，fooyi
 | `Rating`      | 星级评分 |
 
 零第三方依赖 —— 仅需 Python 3.10+ 标准库。
+
+**测试环境：** foobar2000 v2.25.x (x64) · `foo_playcount` v3.x · fooyin v0.12.1。
 
 ## 如何匹配曲目
 

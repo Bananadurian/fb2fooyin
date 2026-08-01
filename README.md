@@ -4,9 +4,15 @@
 
 Migrate foobar2000 playback statistics into [fooyin](https://www.fooyin.org/) on Linux.
 
-foobar2000's `foo_playcount` keeps its stats in `metadb.sqlite`. fooyin keeps
-its own in `~/.local/share/fooyin/fooyin.db`. This tool moves five fields
-across:
+foobar2000's [`foo_playcount`](https://wiki.hydrogenaudio.org/index.php?title=Foobar2000:Components/Playback_Statistics_v3.x_%28foo_playcount%29)
+keeps its stats in `metadb.sqlite`, inside the foobar2000 **profile** folder:
+
+- **Portable** install — `<install_dir>\profile`, e.g. `D:\foobar2000\profile`
+- **Standard** install — `%APPDATA%\foobar2000\profile`, i.e.
+  `C:\Users\<user>\AppData\Roaming\foobar2000\profile`
+
+fooyin keeps its own in `~/.local/share/fooyin/fooyin.db`. This tool moves five
+fields across:
 
 | fooyin column | foobar source |
 |---|---|
@@ -17,6 +23,8 @@ across:
 | `Rating`      | star rating |
 
 No third-party dependencies — Python 3.10+ standard library only.
+
+**Tested with:** foobar2000 v2.25.x (x64) · `foo_playcount` v3.x · fooyin v0.12.1.
 
 ## How it matches tracks
 
