@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import asdict, dataclass
+from datetime import datetime
 
 from .core import (
     EMPTY_TAGS,
@@ -23,7 +24,7 @@ from .core import (
     subsong_from_name,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 @dataclass
@@ -99,6 +100,7 @@ def export(foobar_db: str) -> dict:
 
     return {
         "version": SCHEMA_VERSION,
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "source": foobar_db,
         "stats_index_guid": g,
         "count": len(records),

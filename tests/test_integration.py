@@ -31,8 +31,9 @@ def test_default_foobar_db_is_package_relative():
 
 def test_export_smoke():
     payload = export_mod.export(str(_METADB))
-    assert payload["version"] == 3
+    assert payload["version"] == 4
     assert "stats_index_guid" in payload
+    assert "generated_at" in payload
     assert payload["count"] > 1000
     r = payload["records"][0]
     assert set(r) >= {"hash", "hash_primary", "tail", "play_count", "rating_star"}
