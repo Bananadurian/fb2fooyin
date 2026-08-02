@@ -11,7 +11,7 @@ import time
 
 from .core import (
     FOOYIN_UNRATED,
-    STATS_INDEX_GUID,
+    detect_stats_guid,
     fooyin_track_hash,
     parse_info_tags,
     parse_stats_blob,
@@ -54,9 +54,9 @@ def _fooyin_rating(rating: float | None) -> str:
 
 def _gather_foobar(foobar_db: str, query: str) -> dict[str, tuple]:
     conn = sqlite3.connect(f"file:{foobar_db}?mode=ro", uri=True)
-    g = STATS_INDEX_GUID
     out: dict[str, tuple] = {}
     try:
+        g = detect_stats_guid(conn)
         for filename, blob, info in conn.execute(
             f"SELECT n.filename, d.value, m.info FROM metadb_index_{g} n "
             f"JOIN metadb_index_{g}_data d ON n.key = d.key "
@@ -66,15 +66,20 @@ def _gather_foobar(foobar_db: str, query: str) -> dict[str, tuple]:
             tail = path_tail(filename)
             if tail and query in tail:
                 tags = parse_info_tags(info) if info else _EMPTY_TAGS
+                subsong = subsong_from_name(filename)
                 h = fooyin_track_hash(
-                    tags["artist"],
-                    tags["album"],
-                    tags["disc"],
-                    tags["track"],
-                    tags["title"],
-                    subsong_from_name(filename),
+                    tags["artist"], tags["album"], tags["disc"],
+                    tags["track"], tags["title"], subsong,
                 )
-                out[tail] = (parse_stats_blob(blob), blob, filename, h)
+                hp = (
+                    fooyin_track_hash(
+                        tags["artist"][:1], tags["album"], tags["disc"],
+                        tags["track"], tags["title"], subsong,
+                    )
+                    if len(tags["artist"]) > 1
+                    else None
+                )
+                out[tail] = (parse_stats_blob(blob), blob, filename, h, hp)
     finally:
         conn.close()
     return out
@@ -209,10 +214,13 @@ def render(foobar_db: str, fooyin_db: str, query: str, limit: int) -> str:
             )
         )
         fb_hash = f[3] if f else None
+        fb_primary = f[4] if f else None
         fy_hash = y["hash"] if y else None
         blocks.append(_row("hash", _short(fb_hash), _short(fy_hash)))
         if fb_hash and fy_hash and fb_hash == fy_hash:
             how = "matched BY HASH ✓ (path-independent)"
+        elif fb_primary and fy_hash and fb_primary == fy_hash:
+            how = "matched BY PRIMARY HASH ✓ (multi-artist)"
         elif f and y:
             how = "matched BY TAIL (hashes differ)"
         else:

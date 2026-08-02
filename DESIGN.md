@@ -65,8 +65,13 @@ playback statistics we want:
 | `0C1BD000-…-48EE4249DED0` | same pattern | 20-byte record, unidentified | ✘ |
 | `EF148A2E-…`, `0FEBCD4A-…`, `E58A4298-…`, `7D07305A-…` | same pattern | unidentified / empty `_data` | ✘ |
 
-> In SQLite the GUID dashes become underscores in the actual table names. The
-> tool hardcodes the underscore form as `core.STATS_INDEX_GUID`.
+> In SQLite the GUID dashes become underscores in the actual table names.
+> `core.detect_stats_guid` finds it automatically — the one non-empty index whose
+> `_data` blobs are *uniformly* 40 bytes (the history index above also holds some
+> 40-byte rows, so the discriminator is "all 40", not "has a 40"). The
+> underscore-form constant `core.STATS_INDEX_GUID` is the fallback when detection
+> is inconclusive, and `export` writes the resolved GUID into the JSON
+> (`stats_index_guid`).
 
 ### 2.3. `filename` (the name table key)
 
@@ -243,6 +248,14 @@ it; `core.parse_info_tags` supplies the fields from foobar's `metadb.info`
 Reproduced **100% (9740/9740)** against the live `fooyin.db` using fooyin's own
 stored fields — i.e. the algorithm is exact.
 
+**Primary-artist fallback hash.** foobar keeps every featured artist in the
+`ARTIST` tag, but fooyin often stores only the lead artist, so a multi-artist
+track's full-artist hash misses. `export` therefore emits a *second* hash for
+multi-artist records — the same formula with `artists[:1]` (`hash_primary` in the
+JSON) — and import tries it right after the full hash. On this library it moves
+**258** collab tracks from the path-tail fallback to a content-hash match,
+leaving the tail with a negligible residual.
+
 > Edge case: fooyin falls back to `directory + filename` when the title is
 > empty. That can't be reproduced from foobar's Windows paths, so a title-less
 > track hash-misses and falls back to the tail.
@@ -281,23 +294,28 @@ return `None` — such records can still match by hash.
 Per record, import resolves to a fooyin `TrackHash` (`importer._resolve`):
 
 ```
-hash in fooyin?  ──yes──▶  that TrackHash            (primary, path-independent)
-       └─no─▶  tail in fooyin Tracks?  ──yes──▶  TrackHash   (fallback)
-                     └─no─▶  unmatched (track absent from fooyin)
+full-artist hash in fooyin?  ──yes──▶  that TrackHash        (primary, path-independent)
+   └─no─▶ primary-artist hash in fooyin?  ──yes──▶  TrackHash (multi-artist recovery)
+      └─no─▶ tail in fooyin Tracks?  ──yes──▶  TrackHash      (last-resort fallback)
+         └─no─▶ unmatched (track absent from fooyin)
 ```
 
-then `TrackHash ──▶ TrackStats`. Measured on this library (foobar **25 175**
-records vs fooyin **9 740** tracks):
+then `TrackHash ──▶ TrackStats`. Measured on this library (foobar **24 788**
+path-bearing records vs fooyin **9 740** tracks):
 
 | Resolution | Count | Note |
 |---|---|---|
-| by hash | 24 909 | path-independent; **recovers ~1 134** tracks the tail alone misses (moved / renamed / reorganised) |
-| by tail (fallback) | 238 | all multi-artist m4a — foobar keeps the featured artists, fooyin stores only the primary, so the reproduced hashes differ |
-| unmatched | 28 | not in fooyin at all (deleted albums, radio) → correctly skipped |
+| by full hash | 24 523 | content hash, path-independent; survives moves / renames / reorganisation |
+| by primary-artist hash | 258 | multi-artist tracks fooyin filed under the lead artist only |
+| by tail (last resort) | 4 | broken metadata (empty-tag m4a, field-mismatched DSD) the hash can't reproduce |
+| unmatched | 36 | not in fooyin at all (deleted albums, radio) → correctly skipped |
 
-Combined coverage of the tracks present in both libraries: **100%, zero tail
-ambiguity.** Hash and tail are complementary — the hash survives the renames the
-tail can't, the tail covers the tag-parse residual the hash can't.
+Content hashes (full + primary-artist) carry **99.98%** of the tracks present in
+both libraries; the path tail is a last-resort net for a handful of
+broken-metadata files. Because that tail is anchored on this library's `11.NN`
+genre folder, a differently-structured library simply gets those few reported as
+unmatched — the hash path, being tag-derived, is unaffected. Low-confidence tail
+matches are flagged in the import dry-run for review.
 
 ---
 
@@ -347,6 +365,9 @@ race to write one row, giving a non-deterministic, non-idempotent result.
 - Import is **dry-run by default**; `--apply` is required to write. Dry-run
   opens fooyin **read-only** and prints the change plan (insert/update counts,
   unmatched list, sample diffs).
+- Changes resolved only by path tail (no content-hash match) are listed as
+  **low-confidence** in the plan, so the handful of broken-metadata guesses can
+  be eyeballed before `--apply`.
 - `--apply` copies `fooyin.db` → `fooyin.db.bak-<timestamp>` before any write.
 - To **revert** an import, restore its `fooyin.db.bak-<timestamp>` — this rolls
   back the merged `TrackStats` and the `_fb2fooyin_import` rows together. Deleting
@@ -370,6 +391,6 @@ race to write one row, giving a non-deterministic, non-idempotent result.
   so multi-subsong tracks would hash correctly — but this library has none
   (`Subsong` is always 0), so it is untested.
 - **One direction only** (foobar → fooyin). There is no fooyin → foobar path.
-- The Playback Statistics GUID is treated as a fixed constant for this
-  library's `metadb.sqlite`; a different foobar profile could use a different
-  GUID and would need `core.STATS_INDEX_GUID` updated.
+- The Playback Statistics GUID is **auto-detected** (`core.detect_stats_guid`, by
+  the uniform-40-byte `_data` signature), so a different foobar profile works
+  without code edits; `core.STATS_INDEX_GUID` is only the fallback default.

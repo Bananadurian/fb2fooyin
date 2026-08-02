@@ -30,13 +30,17 @@ No third-party dependencies — Python 3.10+ standard library only.
 
 fooyin identifies a recording by a **content hash of its tags** (`TrackHash`),
 not its path — so it survives files being moved or renamed. The tool reproduces
-that exact hash from foobar's cached tags and matches on it directly (~99% of
-tracks, and it recovers tracks whose paths since changed). For the small
-residual it can't reproduce (e.g. multi-artist m4a, where the two players read
-the artist list differently), it falls back to the **album-relative path tail**
-— the `artist/album/file` segment below the genre folder, identical across the
-two libraries despite different roots, separators and case. Combined coverage of
-tracks present in both libraries: 100%.
+that exact hash from foobar's cached tags and matches on it directly. Multi-artist
+tracks that fooyin filed under the lead artist get a **second hash** tried too
+(the same formula over the primary artist only), so collabs match by content, not
+by path. Together the two hashes cover **99.98%** of tracks — and, being
+tag-derived, they ignore your directory layout entirely.
+
+For the tiny broken-metadata residual the hashes can't reproduce (empty-tag files
+and the like), it falls back to the **album-relative path tail** — the
+`artist/album/file` segment below the genre folder, identical across the two
+libraries despite different roots, separators and case. On a differently-organised
+library those few just get reported as unmatched; the hash path is unaffected.
 
 ## Usage
 
@@ -109,6 +113,8 @@ Existing fooyin rows are merged, not blindly overwritten:
 ## Safety
 
 - Import is **dry-run by default**; `--apply` is required to write.
+- Matches found only by path tail (not a content hash) are flagged
+  **low-confidence** in the dry-run, so you can eyeball the few before `--apply`.
 - `--apply` copies `fooyin.db` to `fooyin.db.bak-<timestamp>` first.
 - To redo or undo an import, restore a `fooyin.db.bak-<timestamp>` — don't delete
   the `_fb2fooyin_import` sidecar by hand, which desyncs the play-count ledger and

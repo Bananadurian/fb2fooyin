@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import sqlite3
 import struct
 from dataclasses import dataclass
 
@@ -109,6 +110,41 @@ def parse_stats_blob(blob: bytes) -> Stats | None:
         added_ms=filetime_to_unix_ms(ft_added),
         rating_star=decode_rating(rating_byte),
     )
+
+
+def detect_stats_guid(conn: sqlite3.Connection) -> str:
+    """Find the Playback Statistics index GUID in an open foobar metadb.
+
+    foobar registers several component indexes as ``metadb_index_<GUID>_data``
+    payload tables; only the Playback Statistics one stores the fixed 40-byte
+    stats BLOB (see ``parse_stats_blob``). We pick the non-empty payload table
+    whose blobs are *uniformly* 40 bytes and parse as a valid stats record —
+    the variable-length history index also holds some 40-byte rows, so "has a
+    40-byte blob" is not enough; "all blobs are 40 bytes" is unique.
+
+    Returns the underscore-form GUID used in the real SQLite table names. Falls
+    back to the well-known ``STATS_INDEX_GUID`` when detection is inconclusive
+    (no candidate, or more than one).
+    """
+    prefix, suffix = "metadb_index_", "_data"
+    candidates: list[str] = []
+    tables = [
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'metadb_index_%'"
+        )
+        if r[0].endswith(suffix)
+    ]
+    for t in tables:
+        n, lo, hi = conn.execute(
+            f"SELECT COUNT(*), MIN(length(value)), MAX(length(value)) FROM {t}"
+        ).fetchone()
+        if not n or lo != _STATS_BLOB_LEN or hi != _STATS_BLOB_LEN:
+            continue
+        sample = conn.execute(f"SELECT value FROM {t} LIMIT 1").fetchone()
+        if sample and parse_stats_blob(sample[0]) is not None:
+            candidates.append(t[len(prefix) : -len(suffix)])
+    return candidates[0] if len(candidates) == 1 else STATS_INDEX_GUID
 
 
 # --- fooyin TrackHash reproduction --------------------------------------

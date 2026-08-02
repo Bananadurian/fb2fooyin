@@ -23,10 +23,11 @@ pytestmark = pytest.mark.skipif(
 
 def test_export_smoke():
     payload = export_mod.export(str(_METADB))
-    assert payload["version"] == 2
+    assert payload["version"] == 3
+    assert "stats_index_guid" in payload
     assert payload["count"] > 1000
     r = payload["records"][0]
-    assert set(r) >= {"hash", "tail", "play_count", "rating_star"}
+    assert set(r) >= {"hash", "hash_primary", "tail", "play_count", "rating_star"}
     assert all(len(rec["hash"]) == 32 for rec in payload["records"][:100])
 
 
@@ -45,9 +46,12 @@ def test_hash_dominates_and_tail_only_mops_up():
         _changes, _unmatched, match = plan_changes(conn, payload["records"])
     finally:
         conn.close()
-    matched = match.by_hash + match.by_tail
+    matched = match.by_hash + match.by_primary + match.by_tail
     assert matched > 5000
-    # content hash is the primary key: it carries the overwhelming majority.
-    assert match.by_hash / matched > 0.95
-    # tail fallback only mops up a small residual (multi-artist m4a, etc.).
-    assert match.by_tail < matched * 0.05
+    # content hashes (full + primary-artist) carry the overwhelming majority.
+    assert (match.by_hash + match.by_primary) / matched > 0.99
+    # the primary-artist hash recovers the multi-artist collabs fooyin filed
+    # under the lead artist...
+    assert match.by_primary > 0
+    # ...leaving only a tiny broken-metadata residual for the path tail.
+    assert match.by_tail < matched * 0.01

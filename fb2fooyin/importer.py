@@ -34,15 +34,22 @@ class Change:
     new: tuple
     is_insert: bool
     contributed: int  # aggregated foobar play count this run wrote (for the sidecar)
+    source: str  # how the row was resolved: "hash" | "hash_primary" | "tail"
 
 
 @dataclass
 class MatchStats:
     """How the run's records resolved to fooyin tracks (for a transparent report)."""
 
-    by_hash: int = 0  # matched by recomputed fooyin TrackHash (path-independent)
-    by_tail: int = 0  # matched only by album-relative path tail (hash fallback)
+    by_hash: int = 0  # matched by recomputed full-artist TrackHash (path-independent)
+    by_primary: int = 0  # matched by the primary-artist-only hash (multi-artist fallback)
+    by_tail: int = 0  # matched only by album-relative path tail (last-resort fallback)
     unmatched: int = 0  # no hash and no tail hit (track absent from fooyin)
+
+
+# Confidence ranking of a resolution source; when several records touch one
+# fooyin row it keeps the highest-confidence one (content hash beats path tail).
+_SOURCE_RANK = {"hash": 3, "hash_primary": 2, "tail": 1}
 
 
 # --- small merge helpers (0/None == "unknown") --------------------------
@@ -147,15 +154,20 @@ def _load_fooyin_hashes(conn: sqlite3.Connection) -> set[str]:
 def _resolve(
     rec: dict, fooyin_hashes: set[str], tail_index: dict[str, list[str]]
 ) -> tuple[list[str], str | None]:
-    """Resolve a record to target fooyin TrackHash(es): hash first, then tail.
+    """Resolve a record to target fooyin TrackHash(es): hash, then tail.
 
-    Returns ``(hashes, source)`` with ``source`` in ``{"hash", "tail", None}``.
-    A recomputed hash present in fooyin wins; otherwise fall back to the
-    album-relative path tail (which may resolve to several duplicate copies).
+    Returns ``(hashes, source)`` with ``source`` in
+    ``{"hash", "hash_primary", "tail", None}``. The full-artist content hash
+    wins; a primary-artist-only hash (for multi-artist tracks fooyin filed under
+    the lead artist) is tried next; otherwise fall back to the album-relative
+    path tail (which may resolve to several duplicate copies).
     """
     h = rec.get("hash")
     if h and h in fooyin_hashes:
         return [h], "hash"
+    hp = rec.get("hash_primary")
+    if hp and hp in fooyin_hashes:
+        return [hp], "hash_primary"
     tail = rec.get("tail")
     tails = tail_index.get(tail) if tail else None
     if tails:
@@ -201,6 +213,8 @@ def plan_changes(
             continue
         if source == "hash":
             match.by_hash += 1
+        elif source == "hash_primary":
+            match.by_primary += 1
         else:
             match.by_tail += 1
         rec_star = rec["rating_star"]
@@ -215,6 +229,7 @@ def plan_changes(
                     "added": rec["added_ms"],
                     "rating": rec_rating,
                     "tail": rec.get("tail") or h,
+                    "source": source,
                 }
             else:
                 a["pc"] += rec["play_count"]  # summed copies (unplayed copies add 0)
@@ -222,6 +237,8 @@ def plan_changes(
                 a["last"] = _max_pos(a["last"], rec["last_played_ms"])
                 a["added"] = _min_pos(a["added"], rec["added_ms"])
                 a["rating"] = _max_pos(a["rating"], rec_rating)
+                if _SOURCE_RANK[source] > _SOURCE_RANK[a["source"]]:
+                    a["source"] = source
 
     # 2. Merge each hash against the current row + sidecar exactly once.
     changes: list[Change] = []
@@ -232,7 +249,7 @@ def plan_changes(
         incoming = (a["added"], a["first"], a["last"], a["pc"], a["rating"])
         new = merge_one(old, incoming, prev.get(h, 0), keep_fooyin_rating)
         if is_insert or new != old:
-            changes.append(Change(h, a["tail"], old, new, is_insert, a["pc"]))
+            changes.append(Change(h, a["tail"], old, new, is_insert, a["pc"], a["source"]))
     return changes, unmatched, match
 
 

@@ -176,10 +176,12 @@ def test_duplicate_copies_share_one_hash_sum_and_idempotent():
     assert pc == 7
 
 
-def _hrecord(tail, pc, hash=None, **kw):
+def _hrecord(tail, pc, hash=None, hash_primary=None, **kw):
     r = _record(tail, pc, **kw)
     if hash is not None:
         r["hash"] = hash
+    if hash_primary is not None:
+        r["hash_primary"] = hash_primary
     return r
 
 
@@ -210,6 +212,36 @@ def test_hash_match_needs_no_tail():
     changes, unmatched, match = plan_changes(conn, [_hrecord(None, 2, hash="H1")])
     assert (match.by_hash, match.by_tail, match.unmatched) == (1, 0, 0)
     assert changes[0].track_hash == "H1"
+
+
+def test_primary_hash_fallback_when_full_hash_absent():
+    conn = _fooyin_conn()
+    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    # full-artist hash misses (fooyin stored only the lead artist), but the
+    # primary-artist-only hash hits -> resolves by hash_primary, path ignored.
+    rec = [_hrecord("renamed/moved/99. gone.flac", 3, hash="NOPE", hash_primary="H1")]
+    changes, unmatched, match = plan_changes(conn, rec)
+    assert unmatched == []
+    assert (match.by_hash, match.by_primary, match.by_tail) == (0, 1, 0)
+    assert changes[0].track_hash == "H1" and changes[0].source == "hash_primary"
+
+
+def test_full_hash_beats_primary():
+    conn = _fooyin_conn()
+    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    # full hash present -> wins even with a (bogus) primary hash also set.
+    changes, _, match = plan_changes(
+        conn, [_hrecord("a/al/01. s.flac", 1, hash="H1", hash_primary="OTHER")]
+    )
+    assert (match.by_hash, match.by_primary) == (1, 0)
+    assert changes[0].source == "hash"
+
+
+def test_change_source_labeled_for_tail():
+    conn = _fooyin_conn()
+    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    changes, _, _ = plan_changes(conn, [_record("a/al/01. s.flac", 1)])
+    assert changes[0].source == "tail"
 
 
 def test_merge_one_insert():

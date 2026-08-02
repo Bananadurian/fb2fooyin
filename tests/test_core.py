@@ -1,7 +1,10 @@
+import sqlite3
 import struct
 
 from fb2fooyin.core import (
+    STATS_INDEX_GUID,
     decode_rating,
+    detect_stats_guid,
     filetime_to_unix_ms,
     fooyin_track_hash,
     parse_info_tags,
@@ -76,6 +79,43 @@ def test_path_tail_windows_and_unix_match():
 
 def test_path_tail_no_genre_returns_none():
     assert path_tail("file:///home/xre/music/random/x.flac") is None
+
+
+# --- stats index GUID auto-detection -------------------------------------
+
+
+def _guid_db(tables: dict) -> sqlite3.Connection:
+    """In-memory metadb with fake ``metadb_index_<guid>_data`` tables, each
+    filled with blobs of the given byte-lengths."""
+    conn = sqlite3.connect(":memory:")
+    for guid, lengths in tables.items():
+        conn.execute(f"CREATE TABLE metadb_index_{guid}_data (key INTEGER, value BLOB)")
+        conn.executemany(
+            f"INSERT INTO metadb_index_{guid}_data VALUES (?, ?)",
+            [(i, b"\x00" * n) for i, n in enumerate(lengths)],
+        )
+    return conn
+
+
+def test_detect_stats_guid_picks_uniform_40():
+    conn = _guid_db(
+        {
+            "AAAA_1111": [40, 40, 40],  # stats: uniformly 40 bytes
+            "BBBB_2222": [20, 20],  # other index: 20-byte records
+            "CCCC_3333": [24, 40, 88],  # history: variable (a 40 exists, not uniform)
+        }
+    )
+    assert detect_stats_guid(conn) == "AAAA_1111"
+
+
+def test_detect_stats_guid_fallback_when_no_candidate():
+    conn = _guid_db({"BBBB_2222": [20, 20], "CCCC_3333": [24, 88]})
+    assert detect_stats_guid(conn) == STATS_INDEX_GUID
+
+
+def test_detect_stats_guid_fallback_when_ambiguous():
+    conn = _guid_db({"AAAA_1111": [40, 40], "DDDD_4444": [40]})
+    assert detect_stats_guid(conn) == STATS_INDEX_GUID
 
 
 # --- fooyin TrackHash reproduction (anchored to real fooyin.db values) ----

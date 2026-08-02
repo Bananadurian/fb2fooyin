@@ -13,8 +13,8 @@ import sqlite3
 from dataclasses import asdict, dataclass
 
 from .core import (
-    STATS_INDEX_GUID,
     Stats,
+    detect_stats_guid,
     fooyin_track_hash,
     parse_info_tags,
     parse_stats_blob,
@@ -22,7 +22,7 @@ from .core import (
     subsong_from_name,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _EMPTY_TAGS = {"artist": [], "album": "", "disc": "", "track": "", "title": ""}
 
@@ -30,6 +30,7 @@ _EMPTY_TAGS = {"artist": [], "album": "", "disc": "", "track": "", "title": ""}
 @dataclass
 class Record:
     hash: str
+    hash_primary: str | None
     tail: str | None
     play_count: int
     first_played_ms: int | None
@@ -47,7 +48,7 @@ def export(foobar_db: str) -> dict:
     uri = f"file:{foobar_db}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     try:
-        g = STATS_INDEX_GUID
+        g = detect_stats_guid(conn)
         rows = conn.execute(
             f"SELECT n.filename, d.value, m.info "
             f"FROM metadb_index_{g} n "
@@ -64,24 +65,43 @@ def export(foobar_db: str) -> dict:
                 skipped_bad_blob += 1
                 continue
             tags = parse_info_tags(info) if info else _EMPTY_TAGS
+            subsong = subsong_from_name(filename)
             h = fooyin_track_hash(
                 tags["artist"],
                 tags["album"],
                 tags["disc"],
                 tags["track"],
                 tags["title"],
-                subsong_from_name(filename),
+                subsong,
+            )
+            # Multi-artist tracks that fooyin filed under the lead artist won't
+            # match the full-artist hash; a primary-artist-only hash recovers
+            # them at import time (see importer._resolve).
+            hp = (
+                fooyin_track_hash(
+                    tags["artist"][:1],
+                    tags["album"],
+                    tags["disc"],
+                    tags["track"],
+                    tags["title"],
+                    subsong,
+                )
+                if len(tags["artist"]) > 1
+                else None
             )
             tail = path_tail(filename)
             if tail is None:
                 no_tail += 1
-            records.append(Record(hash=h, tail=tail, **_stats_fields(stats)))
+            records.append(
+                Record(hash=h, hash_primary=hp, tail=tail, **_stats_fields(stats))
+            )
     finally:
         conn.close()
 
     return {
         "version": SCHEMA_VERSION,
         "source": foobar_db,
+        "stats_index_guid": g,
         "count": len(records),
         "no_tail": no_tail,
         "skipped_bad_blob": skipped_bad_blob,

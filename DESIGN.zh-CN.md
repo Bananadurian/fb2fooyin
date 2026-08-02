@@ -61,8 +61,11 @@ foobar2000 metadb.sqlite  ──export──▶  stats.json  ──import──�
 | `0C1BD000-…-48EE4249DED0` | 同样成对 | 20 字节记录，未识别 | ✘ |
 | `EF148A2E-…`、`0FEBCD4A-…`、`E58A4298-…`、`7D07305A-…` | 同样成对 | 未识别 / `_data` 为空 | ✘ |
 
-> 在 SQLite 中 GUID 的连字符在真实表名里变成下划线。工具以下划线形式硬编码在
-> `core.STATS_INDEX_GUID`。
+> 在 SQLite 中 GUID 的连字符在真实表名里变成下划线。`core.detect_stats_guid`
+> 自动识别它 —— 选出唯一那张「非空、且 `_data` blob 长度**全部**恰好 40 字节」的
+> 索引（上面那个历史索引也含少量 40 字节行，故判别式是「全 40」而非「有 40」）。
+> 下划线形常量 `core.STATS_INDEX_GUID` 仅作检测失败时的兜底；`export` 会把识别到的
+> GUID 写进 JSON（`stats_index_guid`）。
 
 ### 2.3. `filename`（名字表的键）
 
@@ -227,6 +230,12 @@ artists.join(",")  ++  album  ++  discNumber  ++  trackNumber  ++  title  ++  st
 用 fooyin 自身存储的字段对活库 `fooyin.db` 复刻，**100%（9740/9740）**吻合 ——
 即算法精确。
 
+**主艺人兜底哈希。** foobar 在 `ARTIST` 标签里保留所有 featured 艺人，而 fooyin
+往往只存主艺人，因此多艺人曲目的「全艺人哈希」会失配。故 `export` 为多艺人记录再
+算一个哈希 —— 同一公式但用 `artists[:1]`（JSON 里的 `hash_primary`）—— 导入时紧接
+全艺人哈希之后尝试。本库借此把 **258** 首 collab 从路径尾部兜底升级为内容哈希匹配，
+尾部只剩可忽略的残差。
+
 > 边界：当 title 为空时 fooyin 会回退成 `目录 + 文件名`。这无法从 foobar 的
 > Windows 路径复刻，因此无标题曲目会哈希失配、回退到尾部。
 
@@ -261,22 +270,26 @@ zip 内嵌）返回 `None` —— 这类记录仍可按哈希匹配。
 每条记录，导入按此解析到 fooyin `TrackHash`（`importer._resolve`）：
 
 ```
-哈希在 fooyin 里？ ──是──▶  该 TrackHash          （主键，与路径无关）
-       └─否─▶  尾部在 fooyin Tracks 里？ ──是──▶  TrackHash   （兜底）
-                     └─否─▶  未匹配（fooyin 里根本不存在）
+全艺人哈希在 fooyin 里？ ──是──▶  该 TrackHash        （主键，与路径无关）
+   └─否─▶ 主艺人哈希在 fooyin 里？ ──是──▶  TrackHash  （多艺人救回）
+      └─否─▶ 尾部在 fooyin Tracks 里？ ──是──▶  TrackHash  （最后兜底）
+         └─否─▶ 未匹配（fooyin 里根本不存在）
 ```
 
-然后 `TrackHash ──▶ TrackStats`。在本库实测（foobar **25 175** 条记录 vs
+然后 `TrackHash ──▶ TrackStats`。在本库实测（foobar **24 788** 条带路径记录 vs
 fooyin **9 740** 曲）：
 
 | 解析方式 | 数量 | 说明 |
 |---|---|---|
-| 按哈希 | 24 909 | 与路径无关；**额外救回约 1 134** 首尾部匹配不到的（移动/改名/重组） |
-| 按尾部（兜底） | 238 | 全是多艺人 m4a —— foobar 保留了 featured 艺人、fooyin 只存主艺人，故复刻的哈希不同 |
-| 未匹配 | 28 | fooyin 里根本不存在（已删专辑、电台）→ 正确跳过 |
+| 按全艺人哈希 | 24 523 | 内容哈希，与路径无关；扛得住移动/改名/重组 |
+| 按主艺人哈希 | 258 | fooyin 只按主艺人归档的多艺人曲目 |
+| 按尾部（最后兜底） | 4 | 哈希复刻不了的坏元数据（空 tag m4a、字段对不齐的 DSD） |
+| 未匹配 | 36 | fooyin 里根本不存在（已删专辑、电台）→ 正确跳过 |
 
-对两个库都存在的曲目，哈希+尾部合并覆盖：**100%，尾部零歧义。** 哈希与尾部互补
-—— 哈希能扛住尾部扛不住的改名，尾部能覆盖哈希覆盖不了的标签解析残差。
+内容哈希（全艺人 + 主艺人）覆盖两库共有曲目的 **99.98%**；路径尾部只是给少数坏元
+数据文件的最后一张网。由于该尾部锚定本库的 `11.NN` 流派目录，换到结构不同的库时，
+这几首只会被报为「未匹配」—— 基于标签的哈希路径不受影响。低置信度的尾部匹配会在
+导入 dry-run 里标注供审阅。
 
 ---
 
@@ -320,6 +333,8 @@ foobar 时间戳为 0 视作“未知”，绝不覆盖 fooyin 的真实值。
 
 - 导入**默认 dry-run**，必须加 `--apply` 才写入。dry-run 以**只读**打开 fooyin
   并打印变更计划（插入/更新计数、未匹配清单、样例 diff）。
+- 仅靠路径尾部命中（无内容哈希匹配）的变更会在计划里标为**低置信度**，让那少数
+  坏元数据的猜测在 `--apply` 前得以人工过目。
 - `--apply` 在任何写入前把 `fooyin.db` 复制为 `fooyin.db.bak-<时间戳>`。
 - 要**撤销**一次导入，恢复它对应的 `fooyin.db.bak-<时间戳>` —— 这会把合并过的
   `TrackStats` 与 `_fb2fooyin_import` 行一并回滚。若改为手动删除旁路表，则会让
@@ -339,5 +354,5 @@ foobar 时间戳为 0 视作“未知”，绝不覆盖 fooyin 的真实值。
 - **CUE / 子歌曲。** `subsong` 是复刻哈希的一部分（`str(subsong)`），故多子歌曲曲目
   能正确哈希 —— 但本库没有（`Subsong` 恒为 0），因此未经测试。
 - **单向**（foobar → fooyin），没有 fooyin → foobar 的反向路径。
-- 播放统计 GUID 被当作本库 `metadb.sqlite` 的固定常量；不同的 foobar 配置可能使用
-  不同 GUID，届时需更新 `core.STATS_INDEX_GUID`。
+- 播放统计 GUID 现**自动识别**（`core.detect_stats_guid`，靠「全 40 字节 `_data`」
+  特征），因此换个 foobar 配置无需改代码；`core.STATS_INDEX_GUID` 仅为兜底默认值。

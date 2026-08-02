@@ -47,10 +47,11 @@ def _cmd_import(args: argparse.Namespace) -> int:
 
     inserts = sum(1 for c in changes if c.is_insert)
     updates = len(changes) - inserts
+    matched = match.by_hash + match.by_primary + match.by_tail
     print(
         f"records: {len(records)}  "
-        f"matched: {match.by_hash + match.by_tail} "
-        f"(by hash {match.by_hash}, by tail {match.by_tail})  "
+        f"matched: {matched} "
+        f"(by hash {match.by_hash}, by primary {match.by_primary}, by tail {match.by_tail})  "
         f"unmatched: {match.unmatched}\n"
         f"changes: {len(changes)} (insert {inserts}, update {updates})"
     )
@@ -58,6 +59,15 @@ def _cmd_import(args: argparse.Namespace) -> int:
         print(_fmt(c))
     if unmatched:
         print(f"  unmatched sample: {unmatched[: args.sample]}")
+
+    low_conf = [c for c in changes if c.source == "tail"]
+    if low_conf:
+        print(
+            f"\n⚠ low-confidence: {len(low_conf)} matched by path tail, not "
+            f"content hash — review before --apply:"
+        )
+        for c in low_conf[: args.sample]:
+            print(_fmt(c))
 
     if not args.apply:
         print("\nDRY RUN — nothing written. Re-run with --apply to write.")
