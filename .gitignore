@@ -8,7 +8,7 @@ dist/
 venv/
 
 # Generated / runtime artifacts
-stats.json
+stats*.json
 *.bak
 *.bak-*
 fooyin.db.bak-*
