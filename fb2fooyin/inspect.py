@@ -10,6 +10,7 @@ import sqlite3
 import time
 
 from .core import (
+    EMPTY_TAGS,
     FOOYIN_UNRATED,
     detect_stats_guid,
     fooyin_track_hash,
@@ -23,8 +24,6 @@ from .importer import merge_one
 
 _FIELD_W = 13
 _FB_W = 24
-
-_EMPTY_TAGS = {"artist": [], "album": "", "disc": "", "track": "", "title": ""}
 
 
 def _fmt_ms(ms: int | None) -> str:
@@ -65,7 +64,7 @@ def _gather_foobar(foobar_db: str, query: str) -> dict[str, tuple]:
         ):
             tail = path_tail(filename)
             if tail and query in tail:
-                tags = parse_info_tags(info) if info else _EMPTY_TAGS
+                tags = parse_info_tags(info) if info else EMPTY_TAGS
                 subsong = subsong_from_name(filename)
                 h = fooyin_track_hash(
                     tags["artist"], tags["album"], tags["disc"],

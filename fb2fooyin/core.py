@@ -220,6 +220,11 @@ def _collect_values(tokens: list[bytes], start: int) -> list[str]:
     return vals
 
 
+# The tag shape every stage agrees on; also the "no info blob" default that
+# export/inspect reuse (they import ``EMPTY_TAGS`` instead of redefining it).
+EMPTY_TAGS = {"artist": [], "album": "", "disc": "", "track": "", "title": ""}
+
+
 def parse_info_tags(blob: bytes) -> dict:
     """Extract the tag fields fooyin hashes from a foobar ``metadb.info`` BLOB.
 
@@ -227,7 +232,7 @@ def parse_info_tags(blob: bytes) -> dict:
     "title": str}`` with "" / [] for anything absent (e.g. tag-less WAV rips).
     """
     tokens = bytes(blob).split(b"\x00")
-    out: dict = {"artist": [], "album": "", "disc": "", "track": "", "title": ""}
+    out: dict = dict(EMPTY_TAGS)
     for i, tok in enumerate(tokens):
         # ALBUM first: unique suffix, survives being glued to the header binary.
         if not out["album"] and tok.upper().endswith(b"ALBUM") and i + 1 < len(tokens):

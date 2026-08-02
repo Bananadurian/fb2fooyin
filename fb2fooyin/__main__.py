@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 from . import export as export_mod
 from . import importer as import_mod
 from . import inspect as inspect_mod
 
-_DEFAULT_FOOBAR_DB = os.path.expanduser("~/11_music/_tool/fb2fooyin/data/metadb.sqlite")
+_DEFAULT_FOOBAR_DB = str(Path(__file__).resolve().parents[1] / "data" / "metadb.sqlite")
 _DEFAULT_FOOYIN_DB = os.path.expanduser("~/.local/share/fooyin/fooyin.db")
 
 

@@ -21,6 +21,14 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def test_default_foobar_db_is_package_relative():
+    # the CLI default must resolve to the bundled data/metadb.sqlite, not a
+    # hardcoded home path — otherwise a relocated checkout silently breaks.
+    from fb2fooyin.__main__ import _DEFAULT_FOOBAR_DB
+
+    assert _DEFAULT_FOOBAR_DB == str(_METADB)
+
+
 def test_export_smoke():
     payload = export_mod.export(str(_METADB))
     assert payload["version"] == 3

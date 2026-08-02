@@ -13,6 +13,7 @@ import sqlite3
 from dataclasses import asdict, dataclass
 
 from .core import (
+    EMPTY_TAGS,
     Stats,
     detect_stats_guid,
     fooyin_track_hash,
@@ -23,8 +24,6 @@ from .core import (
 )
 
 SCHEMA_VERSION = 3
-
-_EMPTY_TAGS = {"artist": [], "album": "", "disc": "", "track": "", "title": ""}
 
 
 @dataclass
@@ -64,7 +63,7 @@ def export(foobar_db: str) -> dict:
             if stats is None:
                 skipped_bad_blob += 1
                 continue
-            tags = parse_info_tags(info) if info else _EMPTY_TAGS
+            tags = parse_info_tags(info) if info else EMPTY_TAGS
             subsong = subsong_from_name(filename)
             h = fooyin_track_hash(
                 tags["artist"],
