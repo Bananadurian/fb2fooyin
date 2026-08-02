@@ -201,6 +201,21 @@ Records how many plays *this tool* last contributed to each hash, so the
 additive `PlayCount` merge is idempotent across re-runs (see §5). fooyin ignores
 tables it does not know about; it travels with the db through backup/restore.
 
+Created on the **first `--apply`** (never by `export`, `inspect`, or a dry run).
+Treat it as a **receipt, not a cache**: it is the half of the play-count ledger
+that lives outside `TrackStats`. Hand-deleting it undoes nothing — it only drops
+the "back out the last contribution" step, so the next import double-counts. With
+fooyin at `5` and foobar at `10`:
+
+| run | `PlayCount` merge | result |
+|---|---|---|
+| first `--apply` | `5 − 0 + 10` | `15` |
+| re-run, sidecar kept | `15 − 10 + 10` | `15` (idempotent) |
+| re-run, sidecar deleted | `15 − 0 + 10` | `25` (double-counted) |
+
+To redo or undo an import cleanly, restore the backup (§6) instead — it reverts
+`TrackStats` and these rows together, keeping the two halves in sync.
+
 ---
 
 ## 4. The matching key — reproduced fooyin `TrackHash`, path tail as fallback
@@ -333,6 +348,10 @@ race to write one row, giving a non-deterministic, non-idempotent result.
   opens fooyin **read-only** and prints the change plan (insert/update counts,
   unmatched list, sample diffs).
 - `--apply` copies `fooyin.db` → `fooyin.db.bak-<timestamp>` before any write.
+- To **revert** an import, restore its `fooyin.db.bak-<timestamp>` — this rolls
+  back the merged `TrackStats` and the `_fb2fooyin_import` rows together. Deleting
+  the sidecar by hand instead desyncs the play-count ledger and double-counts on
+  the next import (§3.4).
 - `--apply` issues `BEGIN IMMEDIATE`; if fooyin holds the lock it aborts with a
   "close fooyin first" error rather than risk a corrupt/partial write.
 - All writes commit in a single transaction.

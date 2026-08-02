@@ -110,6 +110,9 @@ Existing fooyin rows are merged, not blindly overwritten:
 
 - Import is **dry-run by default**; `--apply` is required to write.
 - `--apply` copies `fooyin.db` to `fooyin.db.bak-<timestamp>` first.
+- To redo or undo an import, restore a `fooyin.db.bak-<timestamp>` — don't delete
+  the `_fb2fooyin_import` sidecar by hand, which desyncs the play-count ledger and
+  double-counts next time (see [DESIGN.md](DESIGN.md) §3.4).
 - It refuses to write if fooyin holds the database lock (close fooyin first).
 - All writes run in a single transaction.
 

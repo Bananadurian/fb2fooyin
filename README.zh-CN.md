@@ -102,6 +102,9 @@ foobar 重算 vs fooyin 存储的 `TrackHash`，`match` 说明该曲是按哈希
 
 - 导入**默认 dry-run**，必须加 `--apply` 才写入。
 - `--apply` 会先把 `fooyin.db` 备份为 `fooyin.db.bak-<时间戳>`。
+- 要重做或撤销一次导入，请恢复某个 `fooyin.db.bak-<时间戳>` —— 不要手动删除
+  `_fb2fooyin_import` 旁路表，那会让播放数账目失同步、下次导入双计（见
+  [DESIGN.zh-CN.md](DESIGN.zh-CN.md) §3.4）。
 - 若 fooyin 持有数据库锁则拒绝写入（请先关闭 fooyin）。
 - 所有写入在单个事务内完成。
 
