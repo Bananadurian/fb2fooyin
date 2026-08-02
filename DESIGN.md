@@ -192,6 +192,12 @@ CREATE TABLE TrackStats (
 Observed values confirming the conventions: `Rating` of `0.4` (=2★), `0.8`
 (=4★), `-1.0` (unrated); timestamps are 13-digit Unix **milliseconds**.
 
+> fooyin's rating **scale** setting (`0-1` / `1-5` / `1-10` / `1-100`) only
+> affects display and file-tag read/write
+> (`src/core/engine/input/ratingtagpolicy.cpp`); `TrackStats.Rating` is always
+> this normalised `0.0–1.0` float (`Track::rating()`), so the tool's `star/5`
+> write is scale-independent.
+
 ### 3.4. Sidecar table created by the tool
 
 ```sql

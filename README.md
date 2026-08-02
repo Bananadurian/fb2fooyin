@@ -48,22 +48,27 @@ Run through [uv](https://docs.astral.sh/uv/) — it builds the (dependency-free)
 package into an isolated environment on first run, no manual venv needed:
 
 ```bash
-cd _tool/fb2fooyin
+git clone https://github.com/Bananadurian/fb2fooyin.git
+cd fb2fooyin
 uv sync                      # optional: create the environment up front
+uv run fb2fooyin --help      # list all commands & flags
 
-# 1. Export foobar stats to JSON (reads data/metadb.sqlite by default, read-only)
-uv run fb2fooyin export --out stats.json
+# 1. Export foobar stats to JSON (read-only). Put your foobar2000 profile's
+#    metadb.sqlite at ./data/metadb.sqlite, or pass --foobar-db PATH. Writes
+#    ./stats.json.
+uv run fb2fooyin export
 
-# 2. Preview the import (dry run — writes nothing). Close fooyin first.
-uv run fb2fooyin import --json stats.json
+# 2. Preview the import — dry run, writes nothing. Close fooyin first. Reads
+#    ./stats.json and ~/.local/share/fooyin/fooyin.db by default.
+uv run fb2fooyin import
 
-# 3. Apply for real (backs up fooyin.db first, refuses if fooyin is running)
-uv run fb2fooyin import --json stats.json --apply
+# 3. Apply for real (backs up fooyin.db first; refuses if fooyin is running).
+uv run fb2fooyin import --apply
 ```
 
-Defaults point at this library's paths, so bare `export` / `import` work too.
-No uv? The package is pure stdlib, so `python3 -m fb2fooyin …` works from this
-directory as a fallback.
+Every path has a default — override with `--foobar-db` / `--out` / `--json` /
+`--fooyin-db`. No uv? The package is pure stdlib, so `python3 -m fb2fooyin …`
+works as a fallback.
 
 ## Cross-checking a track (`inspect`)
 
@@ -126,7 +131,9 @@ Existing fooyin rows are merged, not blindly overwritten:
 
 - Timestamps: Windows FILETIME (100 ns since 1601) → Unix **milliseconds**.
 - Rating byte → stars: `0x3F`=1, `0x6A`=2, `0x95`=3, `0xBF`=4, `0xEA`=5,
-  `0xFF`=unrated. fooyin stores `star / 5` as a REAL (`-1.0` = unrated).
+  `0xFF`=unrated. fooyin stores `star / 5` as a normalised REAL (`-1.0` =
+  unrated) — so fooyin's rating-scale setting (1-5 / 1-10 / 1-100) only changes
+  the display, not what's stored.
 
 ## Tests
 

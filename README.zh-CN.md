@@ -43,21 +43,25 @@ fooyin 用**标签的内容哈希**（`TrackHash`）而非路径来标识一段�
 构建进独立环境，无需手动建 venv：
 
 ```bash
-cd _tool/fb2fooyin
+git clone https://github.com/Bananadurian/fb2fooyin.git
+cd fb2fooyin
 uv sync                      # 可选：预先创建好环境
+uv run fb2fooyin --help      # 查看所有命令与参数
 
-# 1. 导出 foobar 统计到 JSON（默认读取 data/metadb.sqlite，只读）
-uv run fb2fooyin export --out stats.json
+# 1. 导出 foobar 统计到 JSON（只读）。先把你 foobar2000 profile 的 metadb.sqlite
+#    放到 ./data/metadb.sqlite，或用 --foobar-db PATH 指定。输出 ./stats.json。
+uv run fb2fooyin export
 
-# 2. 预览导入（dry-run，不写入任何内容）。请先关闭 fooyin。
-uv run fb2fooyin import --json stats.json
+# 2. 预览导入（dry-run，不写入）。请先关闭 fooyin。默认读取 ./stats.json 与
+#    ~/.local/share/fooyin/fooyin.db。
+uv run fb2fooyin import
 
-# 3. 真正写入（先自动备份 fooyin.db；若 fooyin 正在运行则拒绝）
-uv run fb2fooyin import --json stats.json --apply
+# 3. 真正写入（先自动备份 fooyin.db；若 fooyin 正在运行则拒绝）。
+uv run fb2fooyin import --apply
 ```
 
-默认路径已指向本库，直接 `export` / `import` 亦可。没有 uv？本包纯标准库，可在此
-目录用 `python3 -m fb2fooyin …` 作为回退。
+任一默认值都可用 `--foobar-db` / `--out` / `--json` / `--fooyin-db` 覆盖。没有 uv？
+本包纯标准库，用 `python3 -m fb2fooyin …` 作为回退。
 
 ## 人工核对单曲（`inspect`）
 
@@ -117,7 +121,8 @@ foobar 重算 vs fooyin 存储的 `TrackHash`，`match` 说明该曲是按哈希
 
 - 时间戳：Windows FILETIME（自 1601 起的 100 纳秒计数）→ Unix **毫秒**。
 - 评分字节 → 星级：`0x3F`=1、`0x6A`=2、`0x95`=3、`0xBF`=4、`0xEA`=5、
-  `0xFF`=未评分。fooyin 以 `星/5` 存为 REAL（`-1.0` 表示未评分）。
+  `0xFF`=未评分。fooyin 以 `星/5` 存为归一化 REAL（`-1.0` 表示未评分）——在 fooyin
+  里选 1-5 / 1-10 / 1-100 刻度只改显示、不改存储。
 
 ## 测试
 

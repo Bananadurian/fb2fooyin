@@ -178,6 +178,10 @@ CREATE TABLE TrackStats (
 印证约定的实测值：`Rating` 为 `0.4`（=2★）、`0.8`（=4★）、`-1.0`（未评分）；
 时间戳为 13 位 Unix **毫秒**。
 
+> fooyin 的评分**刻度**设置（`0-1` / `1-5` / `1-10` / `1-100`）只影响显示与文件标签
+> 读写（`src/core/engine/input/ratingtagpolicy.cpp`）；`TrackStats.Rating` 永远是这个
+> 归一化 `0.0–1.0` 浮点（`Track::rating()`），故工具按 `星/5` 写入与刻度无关。
+
 ### 3.4. 工具创建的旁路表
 
 ```sql
