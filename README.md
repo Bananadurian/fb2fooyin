@@ -33,8 +33,14 @@ not its path — so it survives files being moved or renamed. The tool reproduce
 that exact hash from foobar's cached tags and matches on it directly. Multi-artist
 tracks that fooyin filed under the lead artist get a **second hash** tried too
 (the same formula over the primary artist only), so collabs match by content, not
-by path. Together the two hashes cover **99.98%** of tracks — and, being
-tag-derived, they ignore your directory layout entirely.
+by path.
+
+Because the hash is over the raw tag strings, a track re-tagged with different
+capitalisation (`A Strange Kind Of Love` → `A Strange Kind of Love`, typical of
+re-downloading an album from another store) hashes to something completely
+different. A **case-folded hash** is tried next and recovers those. Together the
+three hashes cover **99.98%** of tracks — and, being tag-derived, they ignore
+your directory layout entirely.
 
 For the tiny broken-metadata residual the hashes can't reproduce (empty-tag files
 and the like), it falls back to the **album-relative path tail** — the
@@ -70,6 +76,87 @@ Every path has a default — override with `--foobar-db` / `--out` / `--json` /
 `--fooyin-db`. No uv? The package is pure stdlib, so `python3 -m fb2fooyin …`
 works as a fallback.
 
+## Keeping your stats through file edits (`snapshot` / `restore`)
+
+Once foobar is retired it can no longer help: plays you log in fooyin, and
+albums foobar never saw, exist nowhere else. And when you re-tag or replace a
+file, fooyin mints a new `TrackHash` and the old stats row is stranded — its
+tags are deleted with the old row, and **a hash cannot be turned back into
+tags**, so nothing after the fact can repair it.
+
+So leave evidence first:
+
+```bash
+# Take a snapshot BEFORE editing files. One read, no writes.
+uv run fb2fooyin snapshot --out snapshot.json
+
+# …re-tag / rename / replace files, let fooyin rescan…
+
+# Put the stats back on whatever the recording is called now (dry-run first).
+uv run fb2fooyin restore --json snapshot.json
+uv run fb2fooyin restore --json snapshot.json --apply
+```
+
+`restore` skips anything whose identity never broke, then matches by folded hash
+(re-cased tags), then by exact file path (re-tagged in place). If both fail you
+can enable a last-resort track-number + title pairing by naming the target
+directory — it stays scoped and capped because that kind of guess is only safe
+within one album:
+
+```bash
+uv run fb2fooyin restore --json snapshot.json --to "/path/to/the/new/album" 
+```
+
+Add `--prune-moved` to delete each source row once its stats have been written
+elsewhere (deterministic matches only; a guessed pairing keeps its source row).
+
+### Knowing something broke (`orphans`)
+
+A stats row whose track is gone is the only signal you get. Check it now and
+then — a non-empty list means something changed identity and was never repaired:
+
+```bash
+uv run fb2fooyin orphans --from-json snapshot.json    # read-only
+uv run fb2fooyin orphans --prune                      # dry-run of the cleanup
+uv run fb2fooyin orphans --prune --apply              # delete them
+```
+
+`--from-json` re-attaches a readable path to each orphan. Pruning refuses to run
+while any library root is missing from disk — an unmounted drive makes the whole
+library look orphaned.
+
+### Automating the snapshot
+
+The scheme depends on the snapshot existing *before* the edit. If you'd rather
+not rely on remembering, a weekly systemd user timer bounds the worst case to
+one week — create `~/.config/systemd/user/fb2fooyin-snapshot.service`:
+
+```ini
+[Unit]
+Description=Snapshot fooyin playback stats
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/path/to/fb2fooyin
+ExecStart=/usr/bin/uv run fb2fooyin snapshot --out %h/.local/share/fb2fooyin/snapshot-%%Y%%m%%d.json
+```
+
+and `~/.config/systemd/user/fb2fooyin-snapshot.timer`:
+
+```ini
+[Unit]
+Description=Weekly fooyin stats snapshot
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+then `systemctl --user enable --now fb2fooyin-snapshot.timer`.
+
 ## Cross-checking a track (`inspect`)
 
 To manually confirm a specific song is consistent between the two players,
@@ -101,9 +188,10 @@ back to the tail.
 
 Handy before an import (see what will change) and after (confirm it landed).
 
-## Merge rules (import)
+## Merge rules
 
-Existing fooyin rows are merged, not blindly overwritten:
+**Import (foobar → fooyin)** — additive, because the two players accumulated
+plays independently:
 
 - **PlayCount** — additive but idempotent. A sidecar table `_fb2fooyin_import`
   records how much each run contributed, so re-running (or a grown foobar
@@ -114,17 +202,31 @@ Existing fooyin rows are merged, not blindly overwritten:
   Pass `import --keep-fooyin-rating` to never overwrite a rating already set in
   fooyin (foobar still fills in the empty ones).
 - A zero timestamp means "never" and never overwrites a real one.
+- Duplicate foobar entries for one file (a renamed library root leaves the old
+  path spelling behind) are collapsed before merging — otherwise every play
+  count gets multiplied by the number of stale roots.
+
+**Restore (fooyin → its own snapshot)** — `max`, not additive. Restoring a
+snapshot onto an unchanged database must be a no-op, so play count takes the
+larger of the two rather than summing. The sidecar row moves with the stats, so
+a later foobar import doesn't add its contribution a second time.
 
 ## Safety
 
-- Import is **dry-run by default**; `--apply` is required to write.
-- Matches found only by path tail (not a content hash) are flagged
-  **low-confidence** in the dry-run, so you can eyeball the few before `--apply`.
+- Every writing command is **dry-run by default**; `--apply` is required.
+- Matches found only by path tail (`import`) or by track number + title
+  (`restore`) are flagged **low-confidence** in the dry-run, so you can eyeball
+  the few before `--apply`.
 - `--apply` copies `fooyin.db` to `fooyin.db.bak-<timestamp>` first.
 - To redo or undo an import, restore a `fooyin.db.bak-<timestamp>` — don't delete
   the `_fb2fooyin_import` sidecar by hand, which desyncs the play-count ledger and
   double-counts next time (see [DESIGN.md](DESIGN.md) §3.4).
 - It refuses to write if fooyin holds the database lock (close fooyin first).
+- Deleting rows is never a side effect: `--prune-moved` / `--prune` are separate,
+  off-by-default switches, and the whole-library sweep additionally refuses while
+  a library root is missing from disk.
+- Each JSON records which command produced it, so feeding a snapshot to `import`
+  (or an export to `restore`) fails loudly instead of applying the wrong rule.
 - All writes run in a single transaction.
 
 ## Encodings (verified against the live databases)

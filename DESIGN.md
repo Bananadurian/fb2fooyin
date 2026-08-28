@@ -11,11 +11,14 @@ reads/writes them**. Implementation lives in `fb2fooyin/`; this explains the
 
 ## 1. Goal & first principles
 
-The tool is, at heart, two pure transforms around one intermediate file:
+The tool is a set of pure transforms around **one intermediate file format**:
 
 ```
-foobar2000 metadb.sqlite  ──export──▶  stats.json  ──import──▶  fooyin.db
-        (read-only)                   (portable)              (transactional)
+foobar2000 metadb.sqlite  ──export────▶  stats.json    ──import───▶  fooyin.db
+        (read-only)                                                 (transactional)
+
+fooyin.db  ──snapshot──▶  snapshot.json  ──restore──▶  fooyin.db
+(read-only)                                           (transactional)
 ```
 
 - **export** = read the foobar stats out of an opaque BLOB, read each track's
@@ -23,12 +26,30 @@ foobar2000 metadb.sqlite  ──export──▶  stats.json  ──import──�
   human-readable key/value form — including a **reproduced fooyin `TrackHash`**.
 - **import** = match those records to fooyin tracks — by content hash first,
   path tail as fallback — and merge five fields into fooyin's stats table.
+- **snapshot** = the same record format, produced from fooyin itself.
+- **restore** = put a snapshot's stats back onto whatever the recording is
+  called *now*, repairing identities that broke after the snapshot was taken.
 
-The intermediate JSON carries two *content-stable* identifiers per record: the
-reproduced fooyin **`TrackHash`** (primary — a hash of the tags, immune to any
-path change) and the **album-relative path tail** (fallback — for the few tracks
-whose hash can't be reproduced). Neither is a database rowid or absolute path,
-so the export survives library reorganisation and the two stages stay decoupled.
+Because the JSON is a format rather than a channel, the producer is
+interchangeable: the same consumer logic serves a foreign library (foobar) and
+the library's own past (a snapshot). Each payload is tagged with its `kind` so
+the two are never fed to the wrong consumer — they share the record schema but
+**not** the merge semantics (§5).
+
+Each record carries *content-stable* identifiers, never a rowid or absolute
+path, so it survives library reorganisation and the stages stay decoupled:
+
+| Identifier | Survives | Fails when |
+|---|---|---|
+| `hash` — reproduced fooyin `TrackHash` | any move, rename, reorganisation | a tag changes |
+| `hash_primary` — same, lead artist only | fooyin filing a collab under one artist | — |
+| `hash_norm` — same, case-folded | tags re-cased by a re-download or re-tag | wording changes |
+| `tail` / `file_path` — path | tags rewritten in place | the folder is renamed |
+
+The last two rows are the lesson this design was rewritten around: hash and path
+fail under *opposite* conditions, so keeping both is what makes recovery
+possible. Losing an album's history takes breaking them at the same time — which
+is exactly what re-downloading an album into a renamed folder does.
 
 Five fields are migrated: **play count, first played, last played, added date,
 rating**.
@@ -159,11 +180,27 @@ Location: `~/.local/share/fooyin/fooyin.db`. A normal relational schema.
 | `FilePath` | TEXT NOT NULL | absolute Linux path, lower-cased genre folders, e.g. `/home/xre/11_music/11.11_c-pop/…` |
 | `Subsong` | INTEGER DEFAULT 0 | always 0 in this library |
 | `TrackHash` | TEXT | **content-based** hash (artist/album/title/…), **not** derived from the path. The tool **reproduces** this hash from foobar's tags and matches on it (§4) |
-| *(many tag/tech columns)* | | `Title`, `Artists`, `Album`, … — **not read** on the fooyin side; the hash is reproduced from *foobar's* tags and compared to `TrackHash` |
+| `Title`, `Artists`, `Album`, `DiscNumber`, `TrackNumber` | TEXT | read **only** to recompute hashes — see the boundary below |
+
+`Artists` is a list joined with the unit separator `\x1f`.
 
 Key property (verified): the **same `TrackHash` appears at multiple different
 `FilePath`s** (duplicate album copies), confirming the hash is metadata-derived.
 `UNIQUE(FilePath, Offset, Subsong)`.
+
+> **Boundary — reading fooyin's tag columns.** These columns are read for
+> exactly one purpose: recomputing a hash (`core.read_fooyin_tracks`,
+> `core.build_norm_index`). Tag *values* are never compared between the two
+> libraries. The distinction matters: hash equality is a deterministic identity
+> test, whereas comparing fields is fuzzy matching, which this tool does not do
+> (§8). Verified: recomputing `fooyin_track_hash` from these columns reproduces
+> **9802/9802** stored hashes, so the folded variant built from them is exact
+> rather than approximate.
+
+No soft delete. When a file's tags change, fooyin drops the old `Tracks` row and
+inserts a new one under a new hash — the old identity, tags included, is gone
+from the database. Its `TrackStats` row survives as an **orphan** keyed by a
+hash nothing can be derived from any more (§6).
 
 ### 3.3. `TrackStats` (the write target)
 
@@ -295,37 +332,76 @@ normalise separators, lower-case, then take everything after the
 `/11.\d\d…/` genre folder. Paths with no genre folder (radio, zip-embedded)
 return `None` — such records can still match by hash.
 
-### 4.3. Resolution order & measured coverage
+### 4.3. Auxiliary — the case-folded hash
+
+The exact hash is over the **raw** strings, so a tag that changed only in
+capitalisation produces a completely different hash. That is not hypothetical:
+re-downloading an album from another store returned
+
+| foobar's cached title | the new file's title |
+|---|---|
+| `A Strange Kind **Of** Love` | `A Strange Kind **of** Love` |
+| `Bring **On The** Dancing Horses` | `Bring **on the** Dancing Horses` |
+
+— the same recording, a different hash. Tracks on the same album whose titles
+contain no lower-cased preposition kept matching, which is what made the failure
+look path-related at first: it was not, the folder rename only removed the tail
+fallback that would otherwise have caught it.
+
+`core.norm_track_hash` is the same payload with every string passed through
+`strip().lower()`. Both sides must recompute it — fooyin stores only the exact
+hash — which is why the importer builds a folded index over fooyin's tag columns
+(§3.2).
+
+Folding is deliberately limited to case and surrounding whitespace. Folding
+further (inner whitespace, Unicode normal forms, punctuation) rescued **no**
+additional track on this library while widening the chance that two genuinely
+different recordings collapse onto one hash — and that failure is a *silent
+wrong write*, which is far worse than a miss. Measured collision cost of the
+current fold: **3 of 9731** folded hashes map to more than one `TrackHash`, and
+all three are the same recording present in two album editions — the existing
+"duplicate copies share one row" case (§5), not a new failure mode.
+
+### 4.4. Resolution order & measured coverage
 
 Per record, import resolves to a fooyin `TrackHash` (`importer._resolve`):
 
 ```
 full-artist hash in fooyin?  ──yes──▶  that TrackHash        (primary, path-independent)
    └─no─▶ primary-artist hash in fooyin?  ──yes──▶  TrackHash (multi-artist recovery)
-      └─no─▶ tail in fooyin Tracks?  ──yes──▶  TrackHash      (last-resort fallback)
-         └─no─▶ unmatched (track absent from fooyin)
+      └─no─▶ case-folded hash in fooyin?  ──yes──▶  TrackHash (re-tagged recovery)
+         └─no─▶ tail in fooyin Tracks?  ──yes──▶  TrackHash   (last-resort fallback)
+            └─no─▶ unmatched (track absent from fooyin)
 ```
 
 then `TrackHash ──▶ TrackStats`. Measured on this library (foobar **24 788**
-path-bearing records vs fooyin **9 740** tracks):
+raw records, **10 209** after de-duplication (§5), vs fooyin **9 802** tracks):
 
 | Resolution | Count | Note |
 |---|---|---|
-| by full hash | 24 523 | content hash, path-independent; survives moves / renames / reorganisation |
-| by primary-artist hash | 258 | multi-artist tracks fooyin filed under the lead artist only |
-| by tail (last resort) | 4 | broken metadata (empty-tag m4a, field-mismatched DSD) the hash can't reproduce |
-| unmatched | 36 | not in fooyin at all (deleted albums, radio) → correctly skipped |
+| by full hash | 10 068 | content hash, path-independent; survives moves / renames / reorganisation |
+| by primary-artist hash | 122 | multi-artist tracks fooyin filed under the lead artist only |
+| by case-folded hash | 16 | one artist's albums re-downloaded and re-tagged; nothing else could reach them |
+| by tail (last resort) | 2 | broken metadata (field-mismatched DSD) the hash can't reproduce |
+| unmatched | 1 | not in fooyin at all → correctly skipped |
 
-Content hashes (full + primary-artist) carry **99.98%** of the tracks present in
-both libraries; the path tail is a last-resort net for a handful of
+Content hashes (exact + primary-artist + folded) carry **99.98%** of the tracks
+present in both libraries; the path tail is a last-resort net for a handful of
 broken-metadata files. Because that tail is anchored on this library's `11.NN`
 genre folder, a differently-structured library simply gets those few reported as
-unmatched — the hash path, being tag-derived, is unaffected. Low-confidence tail
-matches are flagged in the import dry-run for review.
+unmatched — the hash path, being tag-derived, is unaffected.
+
+Only tail matches are flagged **low-confidence** in the dry-run. A folded-hash
+match is still a content match and needs no eyeballing, but its **count** is
+reported separately: it is a drift gauge. Sixteen means one album got re-tagged;
+three thousand would mean a library-wide re-tag, which is worth knowing before
+`--apply`.
 
 ---
 
-## 5. Merge semantics (import)
+## 5. Merge semantics
+
+### 5.1. Import (foobar → fooyin) — additive
 
 Existing fooyin rows are merged field-by-field, never blindly overwritten:
 
@@ -335,11 +411,11 @@ Existing fooyin rows are merged field-by-field, never blindly overwritten:
 | `AddedDate` | `min` of non-zero values | ✔ |
 | `LastPlayed` | `max` | ✔ |
 | `Rating` | foobar value if rated, else keep fooyin | ✔ |
+| `PlayCount` | `current − last_contribution + foobar` | ✔ via sidecar |
 
 `--keep-fooyin-rating` flips the rating precedence: a rating already set in
 fooyin is never overwritten, though foobar still fills in the ones fooyin
 lacks.
-| `PlayCount` | `current − last_contribution + foobar` | ✔ via sidecar |
 
 The `PlayCount` rule is the only non-trivial one. Naive addition double-counts on
 re-run; naive overwrite discards plays fooyin logged itself. The sidecar stores
@@ -357,42 +433,192 @@ new = current_playcount − previously_contributed + foobar_playcount
 A zero foobar timestamp is treated as "unknown" and never overwrites a real
 fooyin value.
 
-**Duplicate copies.** Several library copies of one recording share a single
-fooyin `TrackHash` (§3.2), so more than one export record can target the same
-stats row. They are aggregated by hash *before* the merge above — play counts
-summed (an unplayed backup copy adds 0), earliest first/added, latest last,
-highest rating — and the row is written once. Without this the records would
-race to write one row, giving a non-deterministic, non-idempotent result.
+Addition is right *here* because the two libraries accumulated plays
+independently: foobar's count and fooyin's count are disjoint histories of the
+same recording. That premise does not hold for a snapshot of fooyin itself,
+which is why `restore` is a separate command with a different rule (§5.4).
+
+### 5.2. De-duplicating stale foobar roots
+
+foobar's `metadb` keys on the **path spelling**, so renaming a library root
+leaves the old entries in place: this library holds `D:\11_music` (15 019 rows),
+`D:\11_MusicLib` (9 744) and an `exttag_off://` variant — the same files, two to
+three times over, with mirrored stats.
+
+Those are not the duplicate copies §5.3 is about. Summing them multiplied every
+play count by the number of stale roots (one track read `17` in foobar and `51`
+in fooyin). The sidecar could not catch it: it records the *summed* contribution,
+so `51 − 51 + 51 = 51` is idempotent and wrong forever. Idempotence preserves
+whatever it is given; it does not make it correct.
+
+The discriminator is the album-relative tail (`importer.dedupe_records`):
+
+| Same identity, … | Meaning | Rule |
+|---|---|---|
+| …same tail | one file, seen under several stale roots | collapse to one record |
+| …different tail | a genuine second copy in another folder | keep both, they sum (§5.3) |
+
+Measured: 9 139 groups collapse, 523 are real copies, and **0** groups disagree
+on play count — the stale roots are mirrors, so the "which count wins" question
+never arises in practice. Where it would, the maximum wins (one history seen
+twice, not two histories to add) and the track is listed in the run report.
+
+### 5.3. Duplicate copies
+
+Several library copies of one recording share a single fooyin `TrackHash`
+(§3.2), so more than one record can target the same stats row. They are
+aggregated by hash *before* the merge above — play counts summed (an unplayed
+backup copy adds 0), earliest first/added, latest last, highest rating — and the
+row is written once. Without this the records would race to write one row,
+giving a non-deterministic, non-idempotent result.
+
+### 5.4. Restore (fooyin → fooyin) — max, not sum
+
+| Field | Rule |
+|---|---|
+| `FirstPlayed`, `AddedDate` | `min` of non-zero values |
+| `LastPlayed` | `max` |
+| `Rating` | keep fooyin's if set, else the snapshot's |
+| `PlayCount` | **`max(current, snapshot)`** |
+
+`restore` never uses the sidecar arithmetic. Reusing it would mean
+`current − contributed + snapshot`, and with a snapshot of the very same
+database that is `current + (plays fooyin logged since the last import)` — a
+round trip that changes 638 rows and invents 1 277 plays while claiming to
+restore. With `max`, a snapshot taken and restored with nothing changed in
+between is exactly a no-op, which is the property the command is tested against.
+
+`max` costs the plays that landed on the *new* row between the file edit and the
+repair. That is a small, bounded loss (the repair follows the edit closely) and
+buys idempotence, which matters more for a rescue command that gets re-run while
+its dry-run output is being deciphered.
+
+**The sidecar is carried across.** When stats move from hash *A* to hash *B*,
+`_fb2fooyin_import[A]` moves too (never overwriting an entry *B* already has). If
+it did not, a later foobar import would see no prior contribution on *B* and add
+its whole count on top of the restored one. The cost is one field in the JSON
+and one `INSERT OR IGNORE`; the cost of omitting it is a silent double-count
+years later, with nothing left to compare against.
 
 ---
 
-## 6. Safety model
+## 6. The fooyin-side loop — `snapshot` / `restore` / `orphans`
 
-- Import is **dry-run by default**; `--apply` is required to write. Dry-run
-  opens fooyin **read-only** and prints the change plan (insert/update counts,
-  unmatched list, sample diffs).
-- Changes resolved only by path tail (no content-hash match) are listed as
-  **low-confidence** in the plan, so the handful of broken-metadata guesses can
-  be eyeballed before `--apply`.
+### 6.1. Why foobar cannot be the answer
+
+Matching against foobar only works while foobar still knows the track. Once it
+is retired, that premise decays: measured over the 27 days after the migration,
+**638** tracks accumulated **1 277** plays that exist only in fooyin, and **64**
+tracks were added that foobar has never seen at all. For those 64, no import can
+help — there is nothing on the other side to match against.
+
+So the durable failure mode is not "foobar and fooyin disagree", it is "fooyin
+lost track of its own recording". That needs a fooyin-side loop.
+
+### 6.2. `snapshot` — leave evidence before the change
+
+`Tracks` has no soft delete (§3.2). The moment a file's tags change, the
+`FilePath → TrackHash → tags` mapping is gone, leaving a stats row keyed by a
+hash that can no longer be derived from anything. **A hash cannot be reversed
+into tags**, so nothing after the fact can repair it.
+
+`snapshot` is therefore not a backup, it is *evidence*: one read of `Tracks ⋈
+TrackStats` recording each row's exact hash, folded hash, path, track number,
+title, and the sidecar contribution. Its only requirement is timing — it must
+exist **before** the edit. `--path` narrows it to one directory, but the default
+is the whole library precisely because the scoped form assumes you know in
+advance what you are about to break, and the incident that motivated this design
+was noticed weeks late.
+
+Orphans cannot be snapshotted (no tags, nothing to fold), so the command
+protects what is currently healthy and nothing else.
+
+### 6.3. `restore` — put the stats back on the current identity
+
+```
+hash still in Tracks?            ──yes──▶ skip — the identity never broke
+  └─no─▶ folded hash matches?    ──yes──▶ move   (tags re-cased)
+      └─no─▶ same FilePath?      ──yes──▶ move   (re-tagged in place)  ⚠
+          └─no─▶ track no. + folded title, within --to?  ──▶ move      ⚠
+              └─no─▶ unresolved
+```
+
+The first two layers are deterministic. The `FilePath` layer covers the case the
+folded hash misses — tags rewritten *without* renaming — and is the mirror image
+of the folded hash: one survives a rename, the other survives a re-tag.
+
+The last layer is a heuristic and is gated twice: it needs an explicit `--to`
+directory, and the record set must be under `--fuzzy-limit` (100). The scope is
+the part that matters — "track 1 / Intro" is unique within an album and
+worthless across a library. A record-count limit alone would not bound the
+*candidate* set, only the query set.
+
+### 6.4. `orphans` — the only alarm
+
+A stats row whose hash is not in `Tracks`. Every broken identity lands here, so a
+non-empty list means something changed identity without being repaired. This is
+how the original incident should have been noticed: 16 tracks across four albums
+had been stranded for weeks, and nothing said so.
+
+Read-only by default. `--from-json` re-attaches a human-readable path by looking
+each hash up in a snapshot or export. Rows with `PlayCount = 0` are hidden
+unless `--all` — they hold no data and no information, and only dilute the
+signal.
+
+**Pruning.** `restore --prune-moved` deletes a source row once its stats have
+been written elsewhere — completing a move rather than leaving a copy — and only
+for deterministic matches; a heuristic match keeps its source row, because
+"someone glanced at the dry-run" is not a licence to destroy the last copy.
+`orphans --prune` is the unscoped sweep, and exists to keep the alarm meaningful:
+a list that still contains everything ever repaired stops working as a signal.
+Both default to off and require `--apply`.
+
+The unscoped sweep is the riskiest operation in the tool — an unmounted drive
+makes an entire library look like orphans — so it refuses to run while any
+`Libraries.Path` is absent from disk.
+
+---
+
+## 7. Safety model
+
+- Every writing command is **dry-run by default**; `--apply` is required. Dry
+  runs open fooyin **read-only** and print the change plan (insert/update
+  counts, unmatched list, sample diffs).
+- Changes resolved only by path tail (`import`) or by the heuristic layer
+  (`restore`) are listed as **low-confidence**, so the handful of guesses can be
+  eyeballed before `--apply`.
 - `--apply` copies `fooyin.db` → `fooyin.db.bak-<timestamp>` before any write.
 - To **revert** an import, restore its `fooyin.db.bak-<timestamp>` — this rolls
   back the merged `TrackStats` and the `_fb2fooyin_import` rows together. Deleting
   the sidecar by hand instead desyncs the play-count ledger and double-counts on
   the next import (§3.4).
-- `--apply` issues `BEGIN IMMEDIATE`; if fooyin holds the lock it aborts with a
-  "close fooyin first" error rather than risk a corrupt/partial write.
+- `--apply` issues `BEGIN IMMEDIATE` (`importer.begin_write`); if fooyin holds
+  the lock it aborts with a "close fooyin first" error rather than risk a
+  corrupt/partial write.
+- Deletion is never a side effect: `--prune-moved` and `--prune` are separate,
+  default-off switches, and the unscoped one additionally refuses while a
+  library root is missing from disk (§6.4).
+- A payload is tagged with its producer (`kind`); feeding a snapshot to `import`
+  or an export to `restore` fails loudly instead of applying the wrong merge
+  rule.
 - All writes commit in a single transaction.
 
 ---
 
-## 7. Boundaries & non-goals
+## 8. Boundaries & non-goals
 
 - **No audio-file reading.** Tags come from foobar's `metadb.info` cache
-  (§2.5), never by opening the audio files — so export depends only on the
-  metadb and still works for files offloaded to cloud storage.
+  (§2.5) or fooyin's own columns (§3.2), never by opening the audio files — so
+  export works for files offloaded to cloud storage.
 - **Hash reproduction, not audio hashing.** fooyin's `TrackHash` is recomputed
-  from tags (§4.1); the tool never hashes audio content. Path-tail matching
-  remains as the fallback (§4.2).
+  from tags (§4.1); the tool never hashes audio content.
+- **No fuzzy field matching.** Tag columns are read only to recompute hashes
+  (§3.2). The one heuristic layer that compares text (`restore`'s track number +
+  title) is scoped to a directory, capped, off by default, and never permitted
+  to delete its source.
+- **`snapshot` cannot recover the past.** It protects rows that are healthy when
+  it runs; a break that happened before the first snapshot is only repairable
+  from foobar, and only while foobar still knows the track (§6.1).
 - **CUE / subsongs.** `subsong` is part of the reproduced hash (`str(subsong)`),
   so multi-subsong tracks would hash correctly — but this library has none
   (`Subsong` is always 0), so it is untested.
