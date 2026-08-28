@@ -9,6 +9,8 @@ venv/
 
 # Generated / runtime artifacts
 stats*.json
+snapshot*.json
+snapshots/
 *.bak
 *.bak-*
 fooyin.db.bak-*

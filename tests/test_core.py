@@ -2,11 +2,14 @@ import sqlite3
 import struct
 
 from fb2fooyin.core import (
+    FOOYIN_UNRATED,
     STATS_INDEX_GUID,
     decode_rating,
     detect_stats_guid,
     filetime_to_unix_ms,
+    fooyin_rating_to_star,
     fooyin_track_hash,
+    norm_track_hash,
     parse_info_tags,
     parse_stats_blob,
     path_tail,
@@ -208,3 +211,49 @@ def test_parse_info_tagless_blob_is_all_empty():
         "track": "",
         "title": "",
     }
+
+
+# --- case-folded auxiliary hash -----------------------------------------
+
+
+def test_norm_hash_ignores_case_and_surrounding_space():
+    # The real breakage: an album re-downloaded from another store came back
+    # with "A Strange Kind of Love" where foobar had cached "...Kind Of Love".
+    a = norm_track_hash(["Diane Birch"], "The Velveteen Age", "1", "1", "A Strange Kind Of Love", 0)
+    b = norm_track_hash(["diane birch"], "the velveteen age", "1", "1", " a strange kind of love ", 0)
+    assert a == b
+
+
+def test_norm_hash_still_separates_different_recordings():
+    a = norm_track_hash(["A"], "Al", "1", "1", "Song", 0)
+    assert a != norm_track_hash(["A"], "Al", "1", "2", "Song", 0)
+    assert a != norm_track_hash(["A"], "Al", "1", "1", "Other", 0)
+    assert a != norm_track_hash(["B"], "Al", "1", "1", "Song", 0)
+
+
+def test_norm_hash_differs_from_exact_hash_when_case_differs():
+    # Otherwise the extra layer would be redundant with the exact hash.
+    args = (["A"], "Al", "1", "1", "Song", 0)
+    assert norm_track_hash(*args) != fooyin_track_hash(*args)
+
+
+def test_norm_hash_matches_exact_hash_for_already_folded_tags():
+    args = (["a"], "al", "1", "1", "song", 0)
+    assert norm_track_hash(*args) == fooyin_track_hash(*args)
+
+
+# --- fooyin rating round trip -------------------------------------------
+
+
+def test_fooyin_rating_to_star_round_trips_every_observed_value():
+    for star in range(1, 6):
+        assert fooyin_rating_to_star(star_to_fooyin_rating(star)) == star
+
+
+def test_fooyin_rating_handles_unrated_and_float32_noise():
+    assert fooyin_rating_to_star(FOOYIN_UNRATED) is None
+    assert fooyin_rating_to_star(0.0) is None
+    assert fooyin_rating_to_star(None) is None
+    # values as stored by fooyin (float32 widened to double)
+    assert fooyin_rating_to_star(0.40000000596046448) == 2
+    assert fooyin_rating_to_star(0.80000001192092896) == 4

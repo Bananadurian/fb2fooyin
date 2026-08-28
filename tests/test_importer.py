@@ -1,14 +1,17 @@
 import sqlite3
 
-from fb2fooyin.core import FOOYIN_UNRATED
-from fb2fooyin.importer import _SIDECAR_DDL, merge_one, plan_changes
+from fb2fooyin.core import FOOYIN_UNRATED, SIDECAR_DDL, norm_track_hash
+from fb2fooyin.importer import dedupe_records, merge_one, plan_changes
 
 
 def _fooyin_conn():
     conn = sqlite3.connect(":memory:")
     conn.executescript(
         """
-        CREATE TABLE Tracks (FilePath TEXT, TrackHash TEXT);
+        CREATE TABLE Tracks (
+            FilePath TEXT, TrackHash TEXT, Title TEXT, Artists TEXT, Album TEXT,
+            DiscNumber TEXT, TrackNumber TEXT, Subsong INTEGER DEFAULT 0
+        );
         CREATE TABLE TrackStats (
             TrackHash TEXT PRIMARY KEY, LastSeen INTEGER, AddedDate INTEGER,
             FirstPlayed INTEGER, LastPlayed INTEGER, PlayCount INTEGER DEFAULT 0,
@@ -16,8 +19,16 @@ def _fooyin_conn():
         );
         """
     )
-    conn.execute(_SIDECAR_DDL)
+    conn.execute(SIDECAR_DDL)
     return conn
+
+
+def _add_track(conn, path, h, title="s", artists="a", album="al", disc="1", track="1"):
+    conn.execute(
+        "INSERT INTO Tracks (FilePath, TrackHash, Title, Artists, Album,"
+        " DiscNumber, TrackNumber, Subsong) VALUES (?,?,?,?,?,?,?,0)",
+        (path, h, title, artists, album, disc, track),
+    )
 
 
 def _record(tail, pc, first=1000, last=2000, added=500, star=5):
@@ -58,7 +69,7 @@ def _apply_plan_in_memory(conn, records):
 
 def test_insert_new_row():
     conn = _fooyin_conn()
-    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    _add_track(conn, "/x/11.11_c-pop/a/al/01. s.flac", "H1")
     _apply_plan_in_memory(conn, [_record("a/al/01. s.flac", 3)])
     row = conn.execute("SELECT PlayCount, Rating FROM TrackStats WHERE TrackHash='H1'").fetchone()
     assert row == (3, 1.0)
@@ -66,7 +77,7 @@ def test_insert_new_row():
 
 def test_playcount_idempotent_across_reruns():
     conn = _fooyin_conn()
-    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    _add_track(conn, "/x/11.11_c-pop/a/al/01. s.flac", "H1")
     rec = [_record("a/al/01. s.flac", 7)]
     _apply_plan_in_memory(conn, rec)
     _apply_plan_in_memory(conn, rec)  # rerun must not double-count
@@ -76,7 +87,7 @@ def test_playcount_idempotent_across_reruns():
 
 def test_fooyin_own_plays_survive_rerun():
     conn = _fooyin_conn()
-    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    _add_track(conn, "/x/11.11_c-pop/a/al/01. s.flac", "H1")
     rec = [_record("a/al/01. s.flac", 5)]
     _apply_plan_in_memory(conn, rec)
     # user plays it twice inside fooyin between runs
@@ -89,7 +100,7 @@ def test_fooyin_own_plays_survive_rerun():
 
 def test_growing_foobar_count_adds_delta():
     conn = _fooyin_conn()
-    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    _add_track(conn, "/x/11.11_c-pop/a/al/01. s.flac", "H1")
     _apply_plan_in_memory(conn, [_record("a/al/01. s.flac", 5)])
     _apply_plan_in_memory(conn, [_record("a/al/01. s.flac", 8)])  # +3 in foobar
     pc = conn.execute("SELECT PlayCount FROM TrackStats WHERE TrackHash='H1'").fetchone()[0]
@@ -98,7 +109,7 @@ def test_growing_foobar_count_adds_delta():
 
 def test_added_and_first_take_earlier():
     conn = _fooyin_conn()
-    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    _add_track(conn, "/x/11.11_c-pop/a/al/01. s.flac", "H1")
     # fooyin already scanned it with a late AddedDate and no plays
     conn.execute(
         "INSERT INTO TrackStats (TrackHash, AddedDate, FirstPlayed, LastPlayed, PlayCount, Rating)"
@@ -115,7 +126,7 @@ def test_added_and_first_take_earlier():
 
 def test_keep_fooyin_rating_flag():
     conn = _fooyin_conn()
-    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    _add_track(conn, "/x/11.11_c-pop/a/al/01. s.flac", "H1")
     # fooyin already has a 3-star rating the user set
     conn.execute(
         "INSERT INTO TrackStats (TrackHash, AddedDate, FirstPlayed, LastPlayed, PlayCount, Rating)"
@@ -135,7 +146,7 @@ def test_keep_fooyin_rating_flag():
 
 def test_keep_fooyin_rating_still_fills_empty():
     conn = _fooyin_conn()
-    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    _add_track(conn, "/x/11.11_c-pop/a/al/01. s.flac", "H1")
     # fooyin unrated (-1.0); foobar has 4 stars -> flag still fills it
     conn.execute(
         "INSERT INTO TrackStats (TrackHash, AddedDate, FirstPlayed, LastPlayed, PlayCount, Rating)"
@@ -157,8 +168,8 @@ def test_unmatched_tail_reported():
 def test_duplicate_copies_share_one_hash_sum_and_idempotent():
     # Two physical copies of the same recording -> two tails, ONE TrackHash.
     conn = _fooyin_conn()
-    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/copy1/01. s.flac', 'H1')")
-    conn.execute("INSERT INTO Tracks VALUES ('/x/11.20_rnb/a/copy2/01. s.flac', 'H1')")
+    _add_track(conn, "/x/11.11_c-pop/a/copy1/01. s.flac", "H1")
+    _add_track(conn, "/x/11.20_rnb/a/copy2/01. s.flac", "H1")
     recs = [
         _record("a/copy1/01. s.flac", 4, first=1000, last=5000, added=500, star=None),
         _record("a/copy2/01. s.flac", 3, first=800, last=9000, added=400, star=4),
@@ -187,7 +198,7 @@ def _hrecord(tail, pc, hash=None, hash_primary=None, **kw):
 
 def test_hash_match_takes_priority_over_tail():
     conn = _fooyin_conn()
-    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    _add_track(conn, "/x/11.11_c-pop/a/al/01. s.flac", "H1")
     # tail points nowhere, but the recomputed hash is H1 -> matches by hash (robust to rename)
     changes, unmatched, match = plan_changes(conn, [_hrecord("renamed/moved/99. gone.flac", 4, hash="H1")])
     assert unmatched == []
@@ -197,7 +208,7 @@ def test_hash_match_takes_priority_over_tail():
 
 def test_tail_fallback_when_hash_absent_in_fooyin():
     conn = _fooyin_conn()
-    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    _add_track(conn, "/x/11.11_c-pop/a/al/01. s.flac", "H1")
     # recomputed hash not in fooyin (e.g. multi-artist m4a) -> falls back to tail
     changes, unmatched, match = plan_changes(conn, [_hrecord("a/al/01. s.flac", 3, hash="NOTINFOOYIN")])
     assert unmatched == []
@@ -207,7 +218,7 @@ def test_tail_fallback_when_hash_absent_in_fooyin():
 
 def test_hash_match_needs_no_tail():
     conn = _fooyin_conn()
-    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    _add_track(conn, "/x/11.11_c-pop/a/al/01. s.flac", "H1")
     # radio/zip entry: no tail at all, still matches by content hash
     changes, unmatched, match = plan_changes(conn, [_hrecord(None, 2, hash="H1")])
     assert (match.by_hash, match.by_tail, match.unmatched) == (1, 0, 0)
@@ -216,7 +227,7 @@ def test_hash_match_needs_no_tail():
 
 def test_primary_hash_fallback_when_full_hash_absent():
     conn = _fooyin_conn()
-    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    _add_track(conn, "/x/11.11_c-pop/a/al/01. s.flac", "H1")
     # full-artist hash misses (fooyin stored only the lead artist), but the
     # primary-artist-only hash hits -> resolves by hash_primary, path ignored.
     rec = [_hrecord("renamed/moved/99. gone.flac", 3, hash="NOPE", hash_primary="H1")]
@@ -228,7 +239,7 @@ def test_primary_hash_fallback_when_full_hash_absent():
 
 def test_full_hash_beats_primary():
     conn = _fooyin_conn()
-    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    _add_track(conn, "/x/11.11_c-pop/a/al/01. s.flac", "H1")
     # full hash present -> wins even with a (bogus) primary hash also set.
     changes, _, match = plan_changes(
         conn, [_hrecord("a/al/01. s.flac", 1, hash="H1", hash_primary="OTHER")]
@@ -239,7 +250,7 @@ def test_full_hash_beats_primary():
 
 def test_change_source_labeled_for_tail():
     conn = _fooyin_conn()
-    conn.execute("INSERT INTO Tracks VALUES ('/x/11.11_c-pop/a/al/01. s.flac', 'H1')")
+    _add_track(conn, "/x/11.11_c-pop/a/al/01. s.flac", "H1")
     changes, _, _ = plan_changes(conn, [_record("a/al/01. s.flac", 1)])
     assert changes[0].source == "tail"
 
@@ -266,3 +277,103 @@ def test_merge_one_keep_fooyin_rating():
     old = (500, 1000, 2000, 5, 0.6)  # fooyin 3★
     assert merge_one(old, (500, 1000, 2000, 1, 1.0), keep_fooyin_rating=True)[4] == 0.6
     assert merge_one(old, (500, 1000, 2000, 1, 1.0))[4] == 1.0  # default: foobar wins
+
+
+# --- de-duplication of stale foobar roots -------------------------------
+
+
+def test_stale_roots_contribute_once_not_three_times():
+    # foobar keeps an entry per path spelling, so a renamed library root makes
+    # one file appear several times with mirrored stats. Summing them was
+    # multiplying every play count by the number of stale roots.
+    conn = _fooyin_conn()
+    _add_track(conn, "/x/11.11_c-pop/a/al/01. s.flac", "H1")
+    rec = _hrecord("a/al/01. s.flac", 17, hash="H1")
+    _apply_plan_in_memory(conn, [dict(rec), dict(rec), dict(rec)])
+    pc = conn.execute("SELECT PlayCount FROM TrackStats WHERE TrackHash='H1'").fetchone()[0]
+    assert pc == 17
+
+
+def test_dedupe_keeps_genuine_copies_in_other_folders():
+    # Same identity but a different album-relative tail is a real second copy,
+    # which still sums (DESIGN §5) — only same-identity-same-tail collapses.
+    recs = [
+        _hrecord("a/copy1/01. s.flac", 4, hash="H1"),
+        _hrecord("a/copy2/01. s.flac", 3, hash="H1"),
+    ]
+    deduped, conflicts = dedupe_records(recs)
+    assert len(deduped) == 2 and conflicts == []
+
+
+def test_dedupe_takes_max_and_reports_disagreement():
+    # Mirrored roots normally agree; when they don't, the maximum is the
+    # conservative read (one history seen twice, not two histories to add).
+    recs = [
+        _hrecord("a/al/01. s.flac", 20, hash="H1"),
+        _hrecord("a/al/01. s.flac", 7, hash="H1"),
+    ]
+    deduped, conflicts = dedupe_records(recs)
+    assert len(deduped) == 1
+    assert deduped[0]["play_count"] == 20
+    assert conflicts == ["a/al/01. s.flac"]
+
+
+def test_dedupe_merges_timestamps_across_duplicates():
+    recs = [
+        _hrecord("a/al/01. s.flac", 5, hash="H1", first=2000, last=3000, added=900),
+        _hrecord("a/al/01. s.flac", 5, hash="H1", first=1000, last=9000, added=400),
+    ]
+    deduped, _ = dedupe_records(recs)
+    r = deduped[0]
+    assert (r["first_played_ms"], r["last_played_ms"], r["added_ms"]) == (1000, 9000, 400)
+
+
+# --- case-folded hash layer ---------------------------------------------
+
+
+def _nrecord(tail, pc, hash=None, hash_norm=None, **kw):
+    r = _hrecord(tail, pc, hash=hash, **kw)
+    if hash_norm is not None:
+        r["hash_norm"] = hash_norm
+    return r
+
+
+def test_norm_hash_recovers_a_retagged_track():
+    # Title case drifted and the folder was renamed, so neither the exact hash
+    # nor the tail resolves — the folded hash is the only key left.
+    conn = _fooyin_conn()
+    _add_track(
+        conn, "/x/11.13_e-pop/d/al_amazon/01-s.flac", "H2",
+        title="A Strange Kind of Love", artists="Diane Birch", album="The Velveteen Age",
+    )
+    stale = norm_track_hash(
+        ["Diane Birch"], "The Velveteen Age", "1", "1", "A Strange Kind Of Love", 0
+    )
+    changes, unmatched, match = plan_changes(
+        conn, [_nrecord("d/al_web/01. s.flac", 18, hash="GONE", hash_norm=stale)]
+    )
+    assert unmatched == []
+    assert (match.by_hash, match.by_norm, match.by_tail) == (0, 1, 0)
+    assert changes[0].track_hash == "H2" and changes[0].source == "norm"
+    assert changes[0].new[3] == 18
+
+
+def test_exact_hash_beats_norm_hash():
+    conn = _fooyin_conn()
+    _add_track(conn, "/x/11.11_c-pop/a/al/01. s.flac", "H1")
+    _add_track(conn, "/x/11.11_c-pop/a/al/02. t.flac", "H2", title="s")
+    rec = _nrecord("a/al/01. s.flac", 4, hash="H1", hash_norm=norm_track_hash(["a"], "al", "1", "1", "s", 0))
+    changes, _, match = plan_changes(conn, [rec])
+    assert (match.by_hash, match.by_norm) == (1, 0)
+    assert changes[0].track_hash == "H1" and changes[0].source == "hash"
+
+
+def test_norm_hash_beats_tail():
+    conn = _fooyin_conn()
+    _add_track(conn, "/x/11.11_c-pop/a/al/01. s.flac", "H1", title="S")
+    stale = norm_track_hash(["a"], "al", "1", "1", "s", 0)
+    changes, _, match = plan_changes(
+        conn, [_nrecord("a/al/01. s.flac", 4, hash="GONE", hash_norm=stale)]
+    )
+    assert (match.by_norm, match.by_tail) == (1, 0)
+    assert changes[0].source == "norm"

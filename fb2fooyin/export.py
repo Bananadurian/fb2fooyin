@@ -2,8 +2,10 @@
 
 Read-only against the foobar database. Emits one record per foobar stats entry,
 each carrying the recomputed fooyin TrackHash (primary, path-independent match
-key) and the album-relative path tail (fallback), so the import stage can match
-by content identity and fall back to path where identity can't be reproduced.
+key), a case-folded variant of it (for tags that drifted in letter case), and
+the album-relative path tail (last-resort fallback), so the import stage can
+match by content identity and fall back to path where identity can't be
+reproduced.
 """
 
 from __future__ import annotations
@@ -15,22 +17,25 @@ from datetime import datetime
 
 from .core import (
     EMPTY_TAGS,
+    SCHEMA_VERSION,
     Stats,
     detect_stats_guid,
     fooyin_track_hash,
+    norm_track_hash,
     parse_info_tags,
     parse_stats_blob,
     path_tail,
     subsong_from_name,
 )
 
-SCHEMA_VERSION = 4
+KIND = "foobar"
 
 
 @dataclass
 class Record:
     hash: str
     hash_primary: str | None
+    hash_norm: str
     tail: str | None
     play_count: int
     first_played_ms: int | None
@@ -92,14 +97,32 @@ def export(foobar_db: str) -> dict:
             tail = path_tail(filename)
             if tail is None:
                 no_tail += 1
+            # Case-folded hash: recovers tracks whose tags drifted in letter
+            # case only (a re-download or a re-tag), which the exact hash and
+            # -- if the folder was renamed too -- the tail both miss.
+            hn = norm_track_hash(
+                tags["artist"],
+                tags["album"],
+                tags["disc"],
+                tags["track"],
+                tags["title"],
+                subsong,
+            )
             records.append(
-                Record(hash=h, hash_primary=hp, tail=tail, **_stats_fields(stats))
+                Record(
+                    hash=h,
+                    hash_primary=hp,
+                    hash_norm=hn,
+                    tail=tail,
+                    **_stats_fields(stats),
+                )
             )
     finally:
         conn.close()
 
     return {
         "version": SCHEMA_VERSION,
+        "kind": KIND,
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "source": foobar_db,
         "stats_index_guid": g,

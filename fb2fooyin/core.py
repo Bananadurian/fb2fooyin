@@ -13,6 +13,11 @@ import sqlite3
 import struct
 from dataclasses import dataclass
 
+# Version of the intermediate JSON payload, shared by both producers (the
+# foobar ``export`` and the fooyin ``snapshot``) so consumers can tell what
+# fields to expect. v5 added ``hash_norm`` and the ``kind`` producer tag.
+SCHEMA_VERSION = 5
+
 # --- Windows FILETIME <-> Unix time --------------------------------------
 
 # 100-nanosecond ticks between 1601-01-01 (FILETIME epoch) and 1970-01-01.
@@ -67,6 +72,19 @@ def star_to_fooyin_rating(star: int) -> float:
 
 # fooyin's sentinel for "no rating" (observed in TrackStats.Rating).
 FOOYIN_UNRATED = -1.0
+
+
+def fooyin_rating_to_star(rating: float | None) -> int | None:
+    """Inverse of ``star_to_fooyin_rating``; ``None`` when unrated.
+
+    Every rating observed in the live database is an exact multiple of 0.2
+    (plus float32 storage noise like 0.40000000596), so rounding to the
+    nearest star is lossless in practice. 0.0 is treated as unrated, matching
+    foobar's ``_UNRATED_BYTES``.
+    """
+    if rating is None or rating <= 0:
+        return None
+    return max(1, min(5, round(rating * 5)))
 
 
 # --- foobar stats BLOB --------------------------------------------------
@@ -183,6 +201,46 @@ def fooyin_track_hash(
     return hashlib.md5(payload.encode("utf-8")).hexdigest()
 
 
+# Tags drift between the two libraries even when the recording is identical:
+# re-downloading an album from another store, or re-tagging it, commonly only
+# changes letter case ("A Strange Kind Of Love" -> "A Strange Kind of Love").
+# fooyin's hash is over the raw strings, so such a track hash-misses. A second,
+# case-folded hash recovers it. Deliberately minimal — only ``strip().lower()``:
+# folding more (inner whitespace, Unicode forms) rescued no extra track on the
+# real library while widening the chance two genuinely different recordings
+# collapse onto one hash, which would silently write the wrong play counts.
+
+
+def norm_tag(s: str) -> str:
+    """Fold a tag string for the auxiliary hash: trim, then lower-case."""
+    return s.strip().lower()
+
+
+def norm_track_hash(
+    artists: list[str],
+    album: str,
+    disc: str,
+    track: str,
+    title: str,
+    subsong: int,
+) -> str:
+    """``fooyin_track_hash`` over case-folded tags — the auxiliary match key.
+
+    Same payload layout as the real hash, so it stays in lock-step with it;
+    only the strings are normalized. Not a fooyin concept: both sides of a
+    comparison must recompute it.
+    """
+    payload = (
+        ",".join(norm_tag(a) for a in artists)
+        + norm_tag(album)
+        + norm_tag(disc)
+        + norm_tag(track)
+        + norm_tag(title)
+        + str(subsong)
+    )
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()
+
+
 def subsong_from_name(name: str) -> int:
     """foobar metadb keys are ``<subsong>+<uri>`` (0 for normal single-song files)."""
     head = name.split("+", 1)[0]
@@ -276,3 +334,120 @@ def path_tail(path: str) -> str | None:
     p = p.replace("\\", "/").lower()
     m = _GENRE_TAIL_RE.search(p)
     return m.group(1) if m else None
+
+
+# --- fooyin database reads ----------------------------------------------
+
+# Boundary note: the tool reads fooyin's tag columns ONLY to recompute hashes
+# (``norm_track_hash``, and to prove the real ``TrackHash`` is reproducible).
+# It never compares tag *values* between the two libraries — matching stays a
+# hash/path equality test, never a fuzzy field comparison. Verified: recomputing
+# ``fooyin_track_hash`` from these columns reproduces 9802/9802 stored hashes.
+
+FOOYIN_ARTIST_SEP = "\x1f"  # fooyin joins Tracks.Artists with a unit separator
+
+
+@dataclass(frozen=True)
+class FooyinTrack:
+    track_hash: str
+    file_path: str
+    artists: list[str]
+    album: str
+    disc: str
+    track: str
+    title: str
+    subsong: int
+
+    @property
+    def norm_hash(self) -> str:
+        return norm_track_hash(
+            self.artists, self.album, self.disc, self.track, self.title, self.subsong
+        )
+
+
+def read_fooyin_tracks(conn: sqlite3.Connection) -> list[FooyinTrack]:
+    """Every fooyin track that carries a content hash."""
+    rows = conn.execute(
+        "SELECT TrackHash, FilePath, Artists, Album, DiscNumber, TrackNumber, "
+        "Title, Subsong FROM Tracks WHERE TrackHash IS NOT NULL"
+    )
+    return [
+        FooyinTrack(
+            track_hash=h,
+            file_path=path,
+            artists=artists.split(FOOYIN_ARTIST_SEP) if artists else [],
+            album=album or "",
+            disc=disc or "",
+            track=track or "",
+            title=title or "",
+            subsong=subsong or 0,
+        )
+        for h, path, artists, album, disc, track, title, subsong in rows
+    ]
+
+
+def build_norm_index(tracks: list[FooyinTrack]) -> dict[str, list[str]]:
+    """Map case-folded hash -> distinct TrackHash (may be several: see §5).
+
+    Collisions are rare and benign on the real library (3 of 9731, all the same
+    recording present in two album editions), which is the existing
+    "duplicate copies share one row" case rather than a new failure mode.
+    """
+    index: dict[str, list[str]] = {}
+    for t in tracks:
+        bucket = index.setdefault(t.norm_hash, [])
+        if t.track_hash not in bucket:
+            bucket.append(t.track_hash)
+    return index
+
+
+# The sidecar table this tool owns inside fooyin.db: how much play count each
+# import run contributed, so a re-run can back its own previous contribution
+# out instead of double-counting (see importer.merge_one).
+SIDECAR_TABLE = "_fb2fooyin_import"
+
+SIDECAR_DDL = f"""
+CREATE TABLE IF NOT EXISTS {SIDECAR_TABLE} (
+    TrackHash TEXT PRIMARY KEY,
+    ContributedPlayCount INTEGER NOT NULL,
+    ImportedAt INTEGER NOT NULL
+)
+"""
+
+
+# --- merge helpers (0/None == "unknown") --------------------------------
+
+
+def min_pos(*vals: int | None) -> int | None:
+    """Smallest value that is neither None nor 0."""
+    present = [v for v in vals if v]
+    return min(present) if present else None
+
+
+def max_pos(*vals: int | None) -> int | None:
+    """Largest value that is neither None nor 0."""
+    present = [v for v in vals if v]
+    return max(present) if present else None
+
+
+def read_trackstats(conn: sqlite3.Connection) -> dict[str, tuple]:
+    """hash -> (AddedDate, FirstPlayed, LastPlayed, PlayCount, Rating)."""
+    return {
+        h: (added, first, last, pc, rating)
+        for h, added, first, last, pc, rating in conn.execute(
+            "SELECT TrackHash, AddedDate, FirstPlayed, LastPlayed, PlayCount, Rating "
+            "FROM TrackStats"
+        )
+    }
+
+
+def read_contributions(conn: sqlite3.Connection) -> dict[str, int]:
+    """hash -> play count this tool previously wrote; empty if never imported."""
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (SIDECAR_TABLE,)
+    ).fetchone()
+    if not exists:
+        return {}
+    return dict(
+        conn.execute(f"SELECT TrackHash, ContributedPlayCount FROM {SIDECAR_TABLE}")
+    )
